@@ -89,7 +89,28 @@ Notable findings:
 - **Presto (Opera) is the lone holdout** — it deliberately uses a SNOW 2.0
   CSPRNG continuously reseeded with entropy, so its `Math.random()` is genuinely
   unpredictable (no fixed state to recover). Every other engine here is breakable.
-- Captures needing recapture (non-contiguous): `vivaldi1.0`, `opera40`.
+
+### Pinned version transitions (from the sample sweep)
+
+The `relab id` classifier over the full sweep dates every switch:
+
+```
+Chrome:  v1  libc rand()x2 (2⁻³⁰)
+         v10 MWC <<16, hi=36969          (the original V8 1.2 form)
+         v20–32 MWC <<14, hi=18273       (era 1)
+         v33–38 MWC <<16, hi=18273       (era 2)
+         v40–46 MWC <<16, hi=18030       (era 3, the "Marsaglia-3D" fix)
+         v48 ── transitional ──          (still 2⁻³² but no longer MWC)
+         v49–~55 early xorshift128+ (2⁻⁵²) — churny, not yet the stable cache
+         v77+ modern xorshift128+ (reversed cache of 64)  ✅ recoverable
+Firefox: v1–26 drand48 → v50+ xorshift128+ (switch at FF48, late 2015)
+Opera:   v10–11.60 Presto/SNOW2 → v16–22 MWC → v40+ xorshift128+
+```
+
+The **early-xorshift window (Chrome ~48–55, Opera 40, Vivaldi 1.0)** is a distinct
+transitional variant: 2⁻⁵² (so still `s0>>12`) but it fits neither the reversed-
+cache-of-64 model (any shifts) nor a plain in-order stream. Cracking it precisely
+needs the V8 4.9–4.x source (the implementation churned before stabilising by v77).
 
 ## Infra status
 

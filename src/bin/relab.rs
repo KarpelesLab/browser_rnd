@@ -192,15 +192,19 @@ fn sym_xor(a: &Sym, b: &Sym) -> Sym {
 }
 
 /// Symbolic xorshift128+ step on (s0,s1) bit-symbol arrays, mirroring
-/// XorShift128Plus::next_state exactly.
+/// XorShift128Plus::next_state exactly (V8 shifts 23,17,26).
 fn sym_step(s0: &Sym, s1: &Sym) -> (Sym, Sym) {
-    let mut t = *s0; // s1 := old s0
-    let s0_old = *s1; // s0 := old s1
-    t = sym_xor(&t, &sym_shl(&t, 23));
-    t = sym_xor(&t, &sym_shr(&t, 17));
+    sym_step_shifts(s0, s1, 23, 17, 26)
+}
+
+fn sym_step_shifts(s0: &Sym, s1: &Sym, a: usize, b: usize, c: usize) -> (Sym, Sym) {
+    let mut t = *s0;
+    let s0_old = *s1;
+    t = sym_xor(&t, &sym_shl(&t, a));
+    t = sym_xor(&t, &sym_shr(&t, b));
     t = sym_xor(&t, &s0_old);
-    t = sym_xor(&t, &sym_shr(&s0_old, 26));
-    (s0_old, t) // (new_s0, new_s1)
+    t = sym_xor(&t, &sym_shr(&s0_old, c));
+    (s0_old, t)
 }
 
 /// Solve a GF(2) system for 128 unknowns via Gauss-Jordan. Each row: (coeff over
@@ -590,6 +594,29 @@ fn main() {
     let v = &sample.values;
     println!("loaded {} values from {}", v.len(), args[2]);
     match exp.as_str() {
+        "id" => {
+            use browser_rnd::engines::{jscript, spidermonkey, spidermonkey_legacy, v8, v8_legacy, v8_libc};
+            // smallest grid 2^-k
+            let mut grid = 0u32;
+            for k in [30u32, 31, 32, 52, 53, 54] {
+                let s = 2f64.powi(k as i32);
+                if v.iter().all(|&x| (x * s - (x * s).round()).abs() < 1e-4) { grid = k; break; }
+            }
+            let id = match grid {
+                30 => v8_libc::recover(v).map(|_| "Chrome1: libc rand()x2 (MSVCRT)".to_string()),
+                32 => v8_legacy::recover(v).map(|m| format!(
+                    "V8 MWC: combine={:?} hi-lane={} lo-lane={}", m.combine, m.mult0, m.mult1)),
+                52 => v8::recover(v).map(|(_, off)| format!("modern V8 xorshift128+ (offset {off})")),
+                54 => jscript::recover(v).map(|_| "IE drand48 27+27".to_string()),
+                53 => spidermonkey_legacy::recover(v).map(|_| "drand48 (old SpiderMonkey)".to_string())
+                    .or_else(|| spidermonkey::recover(v).map(|_| "modern SpiderMonkey xorshift128+ (z3)".to_string())),
+                _ => None,
+            };
+            match id {
+                Some(s) => println!("grid 2^-{grid} | {s}"),
+                None => println!("grid 2^-{grid} | UNIDENTIFIED (likely Presto/CSPRNG or new variant)"),
+            }
+        }
         "conv" => conv(v),
         "jstlcg" => {
             // JScript hypothesis: value = (top27(s_a)<<27 | top27(s_b)) / 2^54,
@@ -1320,6 +1347,108 @@ fn main() {
         }
         "drand48" => crack_drand48(v),
         "v8xs" => crack_v8_xs(v),
+        "v8z3" => {
+            // Early V8 via z3, free shifts, output = s0>>12 (52-bit) served IN ORDER.
+            use std::process::Command;
+            let k = 8usize;
+            let m: Vec<u64> = v.iter().map(|&x| ((x + 1.0).to_bits()) & 0x000F_FFFF_FFFF_FFFF).collect();
+            let mut smt = String::from("(set-logic QF_BV)\n");
+            for d in ["s0", "s1", "sa", "sb", "sc"] { smt.push_str(&format!("(declare-const {d} (_ BitVec 64))\n")); }
+            for d in ["sa", "sb", "sc"] { smt.push_str(&format!("(assert (bvuge {d} (_ bv1 64)))(assert (bvule {d} (_ bv63 64)))\n")); }
+            let (mut p0, mut p1) = ("s0".to_string(), "s1".to_string());
+            for i in 0..k {
+                let (t1, t2, f) = (format!("t1_{i}"), format!("t2_{i}"), format!("F_{i}"));
+                smt.push_str(&format!("(declare-const {t1} (_ BitVec 64))(assert (= {t1} (bvxor {p0} (bvshl {p0} sa))))\n"));
+                smt.push_str(&format!("(declare-const {t2} (_ BitVec 64))(assert (= {t2} (bvxor {t1} (bvlshr {t1} sb))))\n"));
+                smt.push_str(&format!("(declare-const {f} (_ BitVec 64))(assert (= {f} (bvxor (bvxor {t2} {p1}) (bvlshr {p1} sc))))\n"));
+                // new_s0 = p1; output = new_s0 >> 12 = extract[63:12] of p1
+                smt.push_str(&format!("(assert (= ((_ extract 63 12) {p1}) (_ bv{} 52)))\n", m[i]));
+                p0 = p1; p1 = f;
+            }
+            smt.push_str("(check-sat)\n(get-value (s0 s1 sa sb sc))\n");
+            std::fs::write("/tmp/v8.smt2", &smt).unwrap();
+            let out = Command::new("z3").arg("-T:300").arg("/tmp/v8.smt2").output().unwrap();
+            let text = String::from_utf8_lossy(&out.stdout);
+            println!("  {}", text.lines().next().unwrap_or("?"));
+            if text.contains("sat") && !text.starts_with("unsat") {
+                let dec: Vec<u64> = text.split("(_ bv").skip(1)
+                    .filter_map(|s| s.chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse().ok()).collect();
+                let h: Vec<u64> = text.split("#x").skip(1)
+                    .filter_map(|s| u64::from_str_radix(&s.chars().take_while(|c| c.is_ascii_hexdigit()).collect::<String>(),16).ok()).collect();
+                println!("    shifts(dec tail)={:?} hexes={:?}", &dec[dec.len().saturating_sub(3)..], h);
+            }
+        }
+        "v8shifts" => {
+            // Early-V8 probe: reversed cache of 64 + s0>>12, but scan shift triples.
+            let mant = |x: f64| ((x + 1.0).to_bits()) & 0x000F_FFFF_FFFF_FFFF;
+            let mut hit = false;
+            for &(a, b, c) in &[(23usize, 17usize, 26usize), (23, 18, 5), (23, 17, 26), (17, 23, 26), (23, 9, 26)] {
+                let mut s0: Sym = std::array::from_fn(|i| 1u128 << i);
+                let mut s1: Sym = std::array::from_fn(|i| 1u128 << (64 + i));
+                let mut sym: Vec<Sym> = Vec::new();
+                for _ in 0..192 { let (n0, n1) = sym_step_shifts(&s0, &s1, a, b, c); s0 = n0; s1 = n1; sym.push(s0); }
+                for o in 0..64usize {
+                    let mut rows = Vec::new();
+                    for j in 0..60usize {
+                        let g = (o + j) / 64 * 64 + (63 - (o + j) % 64);
+                        if g >= sym.len() { break; }
+                        let m = mant(v[j]) >> 0;
+                        for bb in 0..52 { rows.push((sym[g][12 + bb], ((m >> bb) & 1) as u8)); }
+                    }
+                    let Some(sol) = solve_gf2(rows) else { continue };
+                    // verify with reversed-cache generation using these shifts
+                    let mut st = browser_rnd::prng::XorShift128Plus::new(sol as u64, (sol >> 64) as u64);
+                    let mut served = Vec::new();
+                    while served.len() < o + v.len().min(200) {
+                        let mut batch = vec![];
+                        for _ in 0..64 {
+                            // step with these shifts manually
+                            let (mut x, s0o) = (st.s0, st.s1);
+                            st.s0 = s0o;
+                            x ^= x << a; x ^= x >> b; x ^= s0o; x ^= s0o >> c; st.s1 = x;
+                            batch.push(browser_rnd::engines::v8::to_double(st.s0));
+                        }
+                        for d in batch.into_iter().rev() { served.push(d); }
+                    }
+                    let ok = served[o..].iter().zip(v).take_while(|(p, q)| **p == **q).count();
+                    if ok > 100 { println!("  REVERSED-CACHE shifts=({a},{b},{c}) offset={o} reproduced {ok}+"); hit = true; break; }
+                }
+                if hit { break; }
+            }
+            if !hit { println!("  no reversed-cache shift variant fit"); }
+        }
+        "v8inorder" => {
+            // Early V8 xorshift128+ hypothesis: s0>>12 served IN ORDER (no reversed
+            // cache). observed[j] = s0 after (offset+j+1) steps. GF(2) solve.
+            let mut s0: Sym = std::array::from_fn(|i| 1u128 << i);
+            let mut s1: Sym = std::array::from_fn(|i| 1u128 << (64 + i));
+            let mut sym: Vec<Sym> = Vec::new();
+            for _ in 0..160 { let (n0, n1) = sym_step(&s0, &s1); s0 = n0; s1 = n1; sym.push(s0); }
+            let mant = |x: f64| ((x + 1.0).to_bits()) & 0x000F_FFFF_FFFF_FFFF;
+            let mut done = false;
+            for off in 0..32usize {
+                let mut rows = Vec::new();
+                for j in 0..60usize {
+                    let g = off + j;
+                    let m = mant(v[j]);
+                    for b in 0..52 { rows.push((sym[g][12 + b], ((m >> b) & 1) as u8)); }
+                }
+                let Some(sol) = solve_gf2(rows) else { continue };
+                // verify in-order forward
+                let mut st = browser_rnd::prng::XorShift128Plus::new(sol as u64, (sol >> 64) as u64);
+                for _ in 0..off { st.next_state(); }
+                let mut ok = 0usize;
+                for &want in v {
+                    st.next_state();
+                    if browser_rnd::engines::v8::to_double(st.s0) == want { ok += 1; } else { break; }
+                }
+                if ok > 100 {
+                    println!("  IN-ORDER xorshift128+ (no cache): offset={off} reproduced {ok}/{}", v.len());
+                    done = true; break;
+                }
+            }
+            if !done { println!("  in-order xorshift128+ did not fit"); }
+        }
         "sm" => crack_sm(v),
         "smz3" => crack_sm_z3(v),
         "iez3" => {
