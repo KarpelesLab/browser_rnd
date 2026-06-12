@@ -19,7 +19,7 @@ fn load(path: &str) -> Sample {
 /// 2^-k (i.e. value * 2^k is integral). The smallest such k is the output width
 /// and pins the double-conversion denominator.
 fn conv(values: &[f64]) {
-    for k in [30u32, 31, 32, 48, 52, 53] {
+    for k in [30u32, 31, 32, 48, 52, 53, 54, 55, 56, 60, 62, 63] {
         let scale = 2f64.powi(k as i32);
         let mut max_err = 0.0f64;
         for &v in values {
@@ -313,6 +313,112 @@ fn main() {
     println!("loaded {} values from {}", v.len(), args[2]);
     match exp.as_str() {
         "conv" => conv(v),
+        "jscript48" => {
+            // Hypothesis: value = (next(27)<<27 | next(27)) / 2^54 from a 48-bit
+            // LCG with drand48 constants; next(27) = state >> 21.
+            let p54 = 2f64.powi(54);
+            let n: Vec<u64> = v.iter().map(|&x| (x * p54).round() as u64).collect();
+            let hi = n[0] >> 27;
+            let lo = n[0] & ((1 << 27) - 1);
+            let mut hits = 0;
+            for x in 0..(1u64 << 21) {
+                let s1 = (hi << 21) | x;
+                let s2 = d_step(s1);
+                if s2 >> 21 == lo {
+                    // verify a few more outputs (2 steps each)
+                    let mut st = s2;
+                    let mut ok = 0;
+                    for k in 1..n.len().min(20) {
+                        let a = d_step(st);
+                        let b = d_step(a);
+                        if ((a >> 21) << 27) + (b >> 21) == n[k] {
+                            ok += 1;
+                            st = b;
+                        } else {
+                            break;
+                        }
+                    }
+                    hits += 1;
+                    if ok >= 10 {
+                        println!("  MATCH drand48 constants: x={x:#x} verified {ok} more outputs");
+                    }
+                }
+            }
+            println!("  {hits} candidate(s) for first output; (0 verified => wrong constants)");
+        }
+        "jscript54" => {
+            // Hypothesis: value = N / 2^54 with N the full state of an LCG
+            // N_{n+1} = (M*N_n + A) mod 2^54. N is exact when value < 0.5.
+            const B: u32 = 54;
+            const MOD: i128 = 1 << B;
+            let n: Vec<i128> = v.iter().map(|&x| (x * (MOD as f64)).round() as i128).collect();
+            let exact = |i: usize| v[i] < 0.5; // N fully recoverable
+            // find a consecutive triple, all exact, with (N1-N0) odd
+            let modinv = |a: i128| -> Option<i128> {
+                let a = a.rem_euclid(MOD);
+                let mut x = 1i128;
+                for _ in 0..7 {
+                    let t = (2 - a * x % MOD).rem_euclid(MOD);
+                    x = (x * t).rem_euclid(MOD);
+                }
+                if a * x % MOD == 1 { Some(x) } else { None }
+            };
+            let mut found = None;
+            for i in 0..n.len() - 2 {
+                if exact(i) && exact(i + 1) && exact(i + 2) {
+                    let d0 = ((n[i + 1] - n[i]) % MOD + MOD) % MOD;
+                    let d1 = ((n[i + 2] - n[i + 1]) % MOD + MOD) % MOD;
+                    if let Some(inv) = modinv(d0) {
+                        let m = d1 * inv % MOD;
+                        let a = ((n[i + 1] - m * n[i]) % MOD + MOD) % MOD;
+                        found = Some((m, a));
+                        break;
+                    }
+                }
+            }
+            match found {
+                None => println!("  no clean triple / not a 54-bit LCG"),
+                Some((m, a)) => {
+                    println!("  candidate M={m} A={a}");
+                    // verify: predict N over exact positions
+                    let mut ok = 0usize;
+                    let mut tot = 0usize;
+                    for i in 0..n.len() - 1 {
+                        if exact(i) && exact(i + 1) {
+                            tot += 1;
+                            if (m * n[i] + a) % MOD == n[i + 1] {
+                                ok += 1;
+                            }
+                        }
+                    }
+                    println!("  LCG relation holds {ok}/{tot} exact consecutive pairs");
+                }
+            }
+        }
+        "denom" => {
+            // For each value, print continued-fraction convergent denominators q
+            // where |v - p/q| is ~0 — the true fixed denominator recurs across all.
+            for &val in v.iter().take(6) {
+                print!("  v={val:.17} -> q in {{");
+                let (mut p0, mut q0, mut p1, mut q1) = (0i128, 1i128, 1i128, 0i128);
+                let mut x = val;
+                for _ in 0..40 {
+                    let a = x.floor();
+                    let (p2, q2) = (a as i128 * p1 + p0, a as i128 * q1 + q0);
+                    if q2 != 0 {
+                        let approx = p2 as f64 / q2 as f64;
+                        if (approx - val).abs() < 1e-15 && q2 > 1 {
+                            print!("{q2} ");
+                        }
+                    }
+                    p0 = p1; q0 = q1; p1 = p2; q1 = q2;
+                    let frac = x - a;
+                    if frac.abs() < 1e-12 { break; }
+                    x = 1.0 / frac;
+                }
+                println!("}}");
+            }
+        }
         "dump" => {
             let bits: u32 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(32);
             let scale = 2f64.powi(bits as i32);

@@ -20,32 +20,41 @@ fn load(rel: &str) -> Option<Vec<f64>> {
 }
 
 #[test]
-fn old_spidermonkey_drand48_firefox1() {
-    let Some(v) = load("spidermonkey/firefox1-winxp.txt") else {
-        eprintln!("skip: fixture missing");
-        return;
-    };
-    let seed = spidermonkey_legacy::recover(&v).expect("recover drand48");
-    let regen = spidermonkey_legacy::generate(seed, v.len());
-    assert!(regen.iter().zip(&v).all(|(a, b)| (a - b).abs() < 1e-12));
+fn old_spidermonkey_drand48() {
+    let mut tried = 0;
+    for rel in ["spidermonkey/firefox1-winxp.txt", "firefox3.txt"] {
+        let Some(v) = load(rel) else { continue };
+        tried += 1;
+        let seed = spidermonkey_legacy::recover(&v).unwrap_or_else(|| panic!("{rel}: drand48"));
+        let regen = spidermonkey_legacy::generate(seed, v.len());
+        assert!(regen.iter().zip(&v).all(|(a, b)| (a - b).abs() < 1e-12), "{rel}");
+    }
+    if tried == 0 {
+        eprintln!("skip: no drand48 fixtures");
+    }
 }
 
 #[test]
-fn old_v8_mwc1616_opera22() {
-    let Some(v) = load("v8/opera22.txt") else {
-        eprintln!("skip: fixture missing");
-        return;
-    };
-    let (s0, s1) = v8_legacy::recover(&v).expect("recover mwc1616");
-    let regen = v8_legacy::generate(s0, s1, v.len());
-    assert!(regen.iter().zip(&v).all(|(a, b)| (a - b).abs() < 1e-15));
+fn old_v8_mwc1616() {
+    // Lane-multiplier order varies by build, so recover() tries both.
+    let mut tried = 0;
+    for rel in ["v8/opera22.txt", "chrome10.txt"] {
+        let Some(v) = load(rel) else { continue };
+        tried += 1;
+        let (s0, s1, m0, m1) = v8_legacy::recover(&v).unwrap_or_else(|| panic!("{rel}: mwc1616"));
+        let regen = v8_legacy::generate_with(s0, s1, m0, m1, v.len());
+        assert!(regen.iter().zip(&v).all(|(a, b)| (a - b).abs() < 1e-15), "{rel}");
+    }
+    if tried == 0 {
+        eprintln!("skip: no MWC1616 fixtures");
+    }
 }
 
 #[test]
 fn modern_v8_xorshift128p() {
     // Any one modern V8 capture proves the path; try a few.
     let mut tried = 0;
-    for rel in ["chrome100_win10.txt", "edge100.txt", "chrome77_android4.4.txt"] {
+    for rel in ["chrome100_win10.txt", "edge100.txt", "chrome77_android4.4.txt", "brave1.0.txt", "opera75.txt"] {
         let Some(v) = load(rel) else { continue };
         tried += 1;
         let (seed, off) = v8::recover(&v)

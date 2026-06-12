@@ -42,13 +42,37 @@ samples/               committed real captures used as test fixtures
 tests/fixtures.rs      checks each capture against its declared engine
 ```
 
-## Status
+## Reverse-engineering status
 
-- [x] xorshift128+ forward/backward, verified invertible
-- [x] V8 / SpiderMonkey / JSC double conversions + generators
-- [x] Structural fingerprinting (mantissa resolution) + UA prior
-- [x] ES3 collector
-- [ ] JScript (IE6) exact LCG constants — candidates in `engines::jscript`,
-      to be pinned from real captures
-- [ ] State recovery / brute force from observed outputs (V8 reversed-cache
-      reconstruction, then SpiderMonkey/JSC)
+Every "cracked" entry is validated by reproducing a real capture's full 4096-value
+sequence (`tests/recover.rs`), not recalled from memory. The `grid` column is the
+double-conversion denominator — the first thing the fingerprint pins down.
+
+| Engine / era | Browsers (samples) | Grid | Algorithm | Recovery | Status |
+|---|---|---|---|---|---|
+| old SpiderMonkey | Firefox 1, 3 | 2⁻⁵³ | drand48 48-bit LCG, `(next26<<27)+next27` | 2²² brute | ✅ cracked |
+| old V8 (MWC) | Chrome 10, Opera 22 | 2⁻³² | MWC1616, mults 18273/36969 | direct lane carry | ✅ cracked |
+| modern V8 | Chrome 77/100, Edge 100, Opera 70/75, Brave | 2⁻⁵² | xorshift128+, `s0>>12`, reversed cache of 64 | GF(2) + offset search | ✅ cracked |
+| modern SpiderMonkey | Firefox 100, Mypal 68 | 2⁻⁵³ | xorshift128+, `(s0+s1)>>11` | nonlinear (carry) → SAT/SMT | ⏳ structure known |
+| JScript | IE 6/7/8/9/10/11 | **2⁻⁵⁴** | 27+27 truncated LCG, unknown constants | LLL lattice | ⏳ structure known |
+| Presto | Opera 10 | 2⁻⁵³ | not drand48 — own generator | TBD | 🔬 investigating |
+| oldest V8 | Chrome 1 (2008) | 2⁻³⁰ | 30-bit MWC variant | TBD | 🔬 investigating |
+
+Notable findings:
+- **JScript emits 54-bit values** (`N/2⁵⁴`), one bit wider than the 53-bit norm —
+  and genuine MSIE6/XP, not a low-precision `rand()`. drand48 constants are ruled out.
+- **V8 version split**: MWC1616 (~32-bit) before Chrome 49, xorshift128+ (52-bit,
+  reversed cache) after. The capture rarely starts on a cache boundary, so recovery
+  searches the batch offset (consistently 4–5 in practice).
+- Captures that don't reproduce and need recapture: `vivaldi1.0`, `opera40`
+  (xorshift, no offset fits), `opera16`, `chrome20`, `chrome30` (MWC lane
+  inconsistency — likely non-contiguous runs).
+
+## Infra status
+
+- [x] xorshift128+ forward/backward (invertible), MWC, LCG generators
+- [x] Structural fingerprinting (mantissa resolution / grid) + UA prior
+- [x] ES3 collector (MSIE6 → modern)
+- [x] GF(2) linear solver; state recovery for drand48, MWC1616, modern V8
+- [x] `src/bin/relab.rs` reverse-engineering harness
+- [ ] modern SpiderMonkey (SAT/carry), JScript (LLL), Presto, oldest-V8 recovery

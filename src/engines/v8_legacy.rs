@@ -45,25 +45,40 @@ fn lane_seed(lo0: u64, lo1: u64, mult: u64) -> u32 {
 }
 
 /// Recover both lane states (the seed producing `values[0]`) from observed
-/// outputs. Verified by full reproduction, so `Some` is conclusive.
-pub fn recover(values: &[f64]) -> Option<(u32, u32)> {
+/// outputs. The multiplier-to-lane assignment varies across V8 builds, so we try
+/// both orders and return whichever reproduces the sequence. Verified by full
+/// reproduction, so `Some` is conclusive. Returns `(s0, s1, mult0, mult1)`.
+pub fn recover(values: &[f64]) -> Option<(u32, u32, u64, u64)> {
     if values.len() < 3 {
         return None;
     }
     let r: Vec<u64> = values.iter().map(|&v| (v * P32).round() as u64).collect();
     let a: Vec<u64> = r.iter().map(|x| (x >> 16) & 0xFFFF).collect();
     let b: Vec<u64> = r.iter().map(|x| x & 0xFFFF).collect();
-    let s0 = lane_seed(a[0], a[1], MULT0);
-    let s1 = lane_seed(b[0], b[1], MULT1);
-    if generate(s0, s1, values.len())
-        .iter()
-        .zip(values)
-        .all(|(x, y)| (x - y).abs() < 1e-15)
-    {
-        Some((s0, s1))
-    } else {
-        None
+    for (m0, m1) in [(MULT0, MULT1), (MULT1, MULT0)] {
+        let s0 = lane_seed(a[0], a[1], m0);
+        let s1 = lane_seed(b[0], b[1], m1);
+        if generate_with(s0, s1, m0, m1, values.len())
+            .iter()
+            .zip(values)
+            .all(|(x, y)| (x - y).abs() < 1e-15)
+        {
+            return Some((s0, s1, m0, m1));
+        }
     }
+    None
+}
+
+/// Generate with explicit per-lane multipliers (for the recovered assignment).
+pub fn generate_with(mut s0: u32, mut s1: u32, mult0: u64, mult1: u64, n: usize) -> Vec<f64> {
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        let r = (((s0 as u64) & 0xFFFF) << 16) | ((s1 as u64) & 0xFFFF);
+        out.push(r as f64 / P32);
+        s0 = lane_step(s0, mult0);
+        s1 = lane_step(s1, mult1);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -73,6 +88,8 @@ mod tests {
     #[test]
     fn recover_round_trip() {
         let vals = generate(0x1234_5678, 0x9abc_def0, 300);
-        assert_eq!(recover(&vals), Some((0x1234_5678, 0x9abc_def0)));
+        let (s0, s1, m0, m1) = recover(&vals).expect("recover");
+        assert_eq!((s0, s1), (0x1234_5678, 0x9abc_def0));
+        assert_eq!((m0, m1), (MULT0, MULT1));
     }
 }
