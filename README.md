@@ -57,7 +57,7 @@ double-conversion denominator — the first thing the fingerprint pins down.
 | modern SpiderMonkey | Firefox 100, Mypal 68 | 2⁻⁵³ | xorshift128+ (23,17,26), **low 53 bits** of `s0+s1` | **z3 SMT** | ✅ cracked |
 | **IE (JScript + Chakra)** | **IE 6/7/8/9/10/11** | **2⁻⁵⁴** | **drand48 48-bit LCG, 27+27 → 2⁵⁴** | **2²¹ brute** | ✅ cracked |
 | JSC (Safari ≤8) | *(no sample yet)* | 2⁻³² | GameRand (Ian Bullard), 2×u32 | closed-form | 🧩 modelled |
-| Presto | Opera 10 | 2⁻⁵³ | not drand48 / not xorshift128+ | TBD | 🔬 open |
+| Presto | Opera 10 | 2⁻⁵³ | **SNOW 2.0 CSPRNG** + entropy reseeding | **infeasible by design** | 🔒 unpredictable |
 | oldest V8 | Chrome 1 (2008) | 2⁻³⁰ | 30-bit MWC variant | TBD | 🔬 open |
 
 Notable findings:
@@ -69,6 +69,9 @@ Notable findings:
   nonlinear over GF(2), so recovery uses the z3 SMT solver.
 - **V8 has 4 eras**: MWC era1 (`<<14`), era2 (`<<16`), era3 (18030), then xorshift128+
   (Chrome 49+, 52-bit, reversed cache of 64; recovery searches the batch offset, ~4–5).
+- **Presto (Opera) is the lone holdout** — it deliberately uses a SNOW 2.0
+  CSPRNG continuously reseeded with entropy, so its `Math.random()` is genuinely
+  unpredictable (no fixed state to recover). Every other engine here is breakable.
 - Captures needing recapture (non-contiguous): `vivaldi1.0`, `opera40`.
 
 ## Infra status

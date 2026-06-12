@@ -8,6 +8,7 @@
 
 pub mod jsc;
 pub mod jscript;
+pub mod presto;
 pub mod spidermonkey;
 pub mod spidermonkey_legacy;
 pub mod v8;
