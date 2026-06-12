@@ -6,41 +6,55 @@ current Chrome / Firefox / Safari**.
 
 ## Why each browser is different
 
-`Math.random()` is not standardized beyond "a double in `[0, 1)`". Every engine
-makes its own choices:
+`Math.random()` is not standardized beyond "a double in `[0, 1)`", and every
+engine — and every *era* of each engine — makes its own choices. For the current
+engines:
 
 | Engine | Browsers | Core PRNG | Double conversion | Serving order |
 |---|---|---|---|---|
 | **V8** | Chrome, Edge, Opera, Brave, Node | xorshift128+ | `bitcast((s0>>12)\|exp) - 1` (52-bit) | **reversed** cache of 64 |
-| **SpiderMonkey** | Firefox | xorshift128+ | `((s0+s1)>>11) * 2⁻⁵³` (high 53) | in order |
-| **JavaScriptCore** | Safari, iOS | xorshift128+ | `((s0+s1) & (2⁵³-1)) * 2⁻⁵³` (low 53) | in order |
-| **JScript** | MSIE 6/7/8 | LCG family *(TBD)* | low-precision scale *(TBD)* | in order |
+| **SpiderMonkey** | Firefox | xorshift128+ | `((s0+s1) & (2⁵³-1)) * 2⁻⁵³` (**low** 53) | in order |
+| **JavaScriptCore** | Safari, iOS | xorshift128+ *(extraction TBD — no sample)* | — | in order |
 
-The shared xorshift128+ recurrence is invertible, so once state is recovered we
-can predict forwards and backwards. The conversion + serving-order quirks are
-how we tell the engines apart and how we map observed doubles back to state bits.
+The conversion is the part that distinguishes them: V8 reads `s0` directly (so
+its recovery is GF(2)-linear), while SpiderMonkey/JSC sum both lanes (`s0+s1`,
+nonlinear over GF(2) → solved with z3). Older engines used entirely different
+generators — see the full table below, which is the authoritative status.
 
 ## Workflow
 
 1. **Capture.** Open `collector/index.html` in the target browser. It runs in
    ES3 so it works all the way back to MSIE 6. Copy the textarea.
-2. **Save.** Drop the capture into `samples/<engine>-<browser><ver>-<os>.txt`.
-   These are committed as regression fixtures (see `samples/README.md`).
-3. **Analyze.** `cargo run -- analyze samples/v8-chrome126-win.txt`
-   — fingerprints the engine from UA + value structure.
-4. **Test.** `cargo test` runs unit tests plus fixture checks over `samples/`.
+2. **Save.** Drop the capture into `samples/` (organised by family, e.g.
+   `samples/ie/`, `samples/v8/`). These are committed as regression fixtures.
+3. **Analyze.** `cargo run -- analyze samples/ie/ie6-winxp.txt`
+   — fingerprints the engine from UA + value structure (grid/resolution).
+4. **Recover.** Confirmed algorithms live in `src/engines/` with a `recover`
+   that reproduces the full capture; `cargo test` exercises them over `samples/`.
+5. **Reverse new ones.** `src/bin/relab.rs` is the scratch harness for probing an
+   unknown capture (`cargo run --bin relab -- <experiment> <sample>`); confirmed
+   findings get promoted into an engine module with a recovery test.
 
 ## Layout
 
 ```
 collector/index.html   ES3 capture page (do not modernize — must run on IE6)
-src/prng/              raw generators: xorshift128+, LCG (no browser quirks)
-src/engines/           per-browser conversions + serving order
+src/prng/              raw generators: xorshift128+ (invertible), MWC, LCG
+src/engines/           per-browser models (generate + recover):
+                         v8, v8_legacy (MWC eras), v8_libc (Chrome 1),
+                         spidermonkey, spidermonkey_legacy (drand48),
+                         jscript (IE6-11), jsc (Safari GameRand), presto
+src/gf2.rs             GF(2) linear solver (modern V8 recovery)
 src/sample.rs          parse captured textarea dumps
-src/analyze.rs         engine fingerprinting
+src/analyze.rs         engine fingerprinting (grid / mantissa resolution + UA)
+src/bin/relab.rs       reverse-engineering scratch harness (incl. z3 experiments)
 samples/               committed real captures used as test fixtures
-tests/fixtures.rs      checks each capture against its declared engine
+tests/fixtures.rs      well-formedness checks over every capture
+tests/recover.rs       end-to-end: recover state → reproduce the full sequence
 ```
+
+z3 (SMT solver) is an optional external tool; only the SpiderMonkey recovery and
+some `relab` experiments use it, and tests that need it skip cleanly if absent.
 
 ## Reverse-engineering status
 
@@ -83,4 +97,6 @@ Notable findings:
 - [x] Structural fingerprinting (grid) + UA prior; ES3 collector (MSIE6 → modern)
 - [x] GF(2) linear solver (modern V8); z3 SMT backend (modern SpiderMonkey)
 - [x] `src/bin/relab.rs` reverse-engineering harness (z3 experiments)
-- [ ] Presto and oldest-V8 (chrome1) recovery; a Safari capture to validate GameRand
+- [x] **Recovery for every engine except Presto** (which is a CSPRNG — not breakable)
+- [ ] A Safari capture to validate the GameRand model + pin the modern-JSC extraction
+- [ ] Optional: transition-boundary captures (Chrome 49/39, Firefox 49, legacy Edge)
