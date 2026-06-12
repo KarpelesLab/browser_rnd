@@ -113,12 +113,6 @@ fn best_mwc_mult(lo: &[u64], window: usize) -> (u64, usize) {
     (best_c, best_score)
 }
 
-/// Recover a lane's full 32-bit initial state from observed lows + multiplier.
-fn recover_lane_state(lo: &[u64], c: u64) -> u64 {
-    let hi0 = (lo[1] + M16 - (c * lo[0]) % M16) % M16;
-    (hi0 << 16) | lo[0]
-}
-
 /// Full MWC1616 crack: split r into two lanes by the given bit layout, recover
 /// both states, regenerate, and report how many of the N values reproduce.
 /// `layout` = (lane0_shift, lane_bits): r = (lane0 << lane0_shift) | lane1, each
@@ -313,6 +307,49 @@ fn main() {
     println!("loaded {} values from {}", v.len(), args[2]);
     match exp.as_str() {
         "conv" => conv(v),
+        "lcgfull" => {
+            // Test value = state/2^B with state a full LCG mod 2^B (no hidden
+            // bits), single step per output. Also probes 2-steps-per-output.
+            let b: u32 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(53);
+            let md: i128 = 1 << b;
+            let n: Vec<i128> = v.iter().map(|&x| (x * (md as f64)).round() as i128).collect();
+            let modinv = |a: i128| -> Option<i128> {
+                let a = a.rem_euclid(md);
+                if a % 2 == 0 { return None; }
+                let mut x = 1i128;
+                for _ in 0..8 {
+                    let t = (2 - a * x % md).rem_euclid(md);
+                    x = (x * t).rem_euclid(md);
+                }
+                if a * x % md == 1 { Some(x) } else { None }
+            };
+            for stride in [1usize, 2, 3] {
+                // find a base index whose forward difference is odd (invertible)
+                let mut solved = None;
+                for base in 0..200.min(n.len() - 2 * stride) {
+                    let (i0, i1, i2) = (base, base + stride, base + 2 * stride);
+                    let d0 = (n[i1] - n[i0]).rem_euclid(md);
+                    if let Some(inv) = modinv(d0) {
+                        let d1 = (n[i2] - n[i1]).rem_euclid(md);
+                        let m = d1 * inv % md;
+                        let a = (n[i1] - m * n[i0]).rem_euclid(md);
+                        solved = Some((m, a));
+                        break;
+                    }
+                }
+                let Some((m, a)) = solved else {
+                    println!("  stride={stride}: no invertible triple");
+                    continue;
+                };
+                let mut ok = 0usize;
+                for k in 0..n.len() - stride {
+                    if (m * n[k] + a).rem_euclid(md) == n[k + stride] {
+                        ok += 1;
+                    }
+                }
+                println!("  stride={stride} B={b}: M={m} A={a} -> {ok}/{} hold", n.len() - stride);
+            }
+        }
         "jscript48" => {
             // Hypothesis: value = (next(27)<<27 | next(27)) / 2^54 from a 48-bit
             // LCG with drand48 constants; next(27) = state >> 21.
