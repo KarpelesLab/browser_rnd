@@ -1547,20 +1547,20 @@ fn main() {
                     .filter_map(|s| u64::from_str_radix(&s.chars().take_while(|c| c.is_ascii_hexdigit()).collect::<String>(),16).ok()).collect();
                 if h.len() < 2 { None } else { Some((h[0], h[1])) }
             };
-            // reversed-cache sum-low52 generator: fill 64 (gen0..63), serve reversed
+            // V8 5.1-5.3: batch of 62 (slots 2..63) filled forward, served reversed.
             let gen_rev = |s0: u64, s1: u64, n: usize| -> Vec<f64> {
                 let mut st = browser_rnd::prng::XorShift128Plus::new(s0, s1);
                 let mut out = Vec::new();
                 while out.len() < n {
-                    let mut batch = Vec::with_capacity(64);
-                    for _ in 0..64 { st.next_state(); batch.push((st.sum() & 0x000F_FFFF_FFFF_FFFF) as f64 / p52); }
+                    let mut batch = Vec::with_capacity(62);
+                    for _ in 0..62 { st.next_state(); batch.push((st.sum() & 0x000F_FFFF_FFFF_FFFF) as f64 / p52); }
                     for d in batch.into_iter().rev() { if out.len() < n { out.push(d); } }
                 }
                 out
             };
             let mut done = false;
-            for o in 0..56usize {
-                let take = 64 - o;
+            for o in 0..54usize {
+                let take = 62 - o;
                 if take < 8 { break; }
                 let mut win: Vec<f64> = v[..take].to_vec();
                 win.reverse();

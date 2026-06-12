@@ -102,8 +102,9 @@ Chrome:  v1  libc rand()x2 (2⁻³⁰)
          v40–46 MWC <<16, hi=18030       (era 3, the "Marsaglia-3D" fix)
          v48     MWC 18030 + %_ConstructDouble conv  (4.9 "Stage A")  ✅ z3
          v49–50  xorshift128+ in-order, (s0+s1)&mask52 (4.9 "Stage B") ✅ z3
-         v52–53  xorshift128+, V8 5.1–5.3 variant     (🔬 open)
-         v77+    xorshift128+ reversed cache, s0>>12   (stable)        ✅ GF(2)
+         v52–53  xorshift128+, (s0+s1)&mask52, batch of 62 served
+                 REVERSED (V8 5.1–5.3)                                ✅ z3
+         v77+    xorshift128+ reversed cache, s0>>12 (V8 ~7.0+ stable) ✅ GF(2)
 Firefox: v1–26 drand48 → v50+ xorshift128+ (switch at FF48, late 2015)
 Opera:   v10–11.60 Presto/SNOW2 → v16–22 MWC → v40+ xorshift128+
 ```
@@ -117,13 +118,15 @@ real rewrite: xorshift128+ served **in order** with `ToDouble = (s0+s1)&mantissa
 switch the conversion to `s0>>12` *and* add the reversed 64-cache — the stable form
 that recovers with plain GF(2).
 
-There's a **third, still-open xorshift variant** in between: V8 5.1–5.3 (Chrome 52–53,
-Opera 38–40, ~mid-2016). A *clean Chrome* capture (chrome53) and a recaptured opera40
-both fail identically — so it's a genuine algorithm variant, not a capture artifact.
-It fits **none** of: in-order × {s0,s1,sum} × {top-52, low-52} (free shift), nor
-reversed-cache + `s0>>12` (scanned shifts), nor reversed-cache + `(s0+s1)&mask52`.
-It's almost certainly the reversed cache paired with a conversion/shift combo the
-black-box search can't reach; closing it needs the V8 5.1–5.3 source.
+There's a **third xorshift variant** in between: V8 5.1–5.3 (Chrome 52–53, Opera
+38–40, ~mid-2016). It keeps the Stage-B `(s0+s1)&mask52` conversion but **reverses
+the cache serving order**: each batch fills slots 2..63 forward (62 outputs) and is
+served top-down (slot 63 first). So within each batch of 62, observed order is the
+reverse of generation order. Recovery de-reverses a batch window, solves the in-order
+Stage-B system with z3, and searches the batch offset. The single-word `s0>>12`
+conversion + the C++ FixedDoubleArray cache only arrive ~V8 7.0 / Chrome 70 — that's
+the stable form `v8::recover` handles with plain GF(2). The xorshift shift triple
+(23,17,26) is constant from 4.9 through ≥7.0.
 
 ## Infra status
 

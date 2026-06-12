@@ -223,6 +223,87 @@ pub fn recover_early(values: &[f64]) -> Option<XorShift128Plus> {
     }
 }
 
+// --- V8 5.1–5.3 (Chrome 52–53, Opera 38–40) ---------------------------------
+// Same Stage-B conversion `(s0+s1) & mantissaMask`, but the cache serving order
+// REVERSED: each batch fills slots 2..63 forward (62 outputs) and is served
+// top-down (slot 63 first, down to slot 2). So within each batch of 62 the
+// observed order is the reverse of generation order. (Conversion stays sum-based
+// until ~V8 7.0 / Chrome 70, which is when `s0>>12` + the FixedDoubleArray cache
+// land — that's the stable form `recover` handles.)
+
+const BATCH_5X: usize = 62;
+
+/// Solve the in-order Stage-B system (`(s0+s1)&mask52`) for 8 outputs via z3.
+fn z3_sum_low52(o: &[u64]) -> Option<(u64, u64)> {
+    use std::process::Command;
+    let mut smt = String::from("(set-logic QF_BV)\n(declare-const s0 (_ BitVec 64))\n(declare-const s1 (_ BitVec 64))\n");
+    let (mut p0, mut p1) = ("s0".to_string(), "s1".to_string());
+    for (i, &oi) in o.iter().take(8).enumerate() {
+        let (t1, t2, f) = (format!("t1_{i}"), format!("t2_{i}"), format!("F_{i}"));
+        smt.push_str(&format!("(declare-const {t1} (_ BitVec 64))(assert (= {t1} (bvxor {p0} (bvshl {p0} (_ bv23 64)))))\n"));
+        smt.push_str(&format!("(declare-const {t2} (_ BitVec 64))(assert (= {t2} (bvxor {t1} (bvlshr {t1} (_ bv17 64)))))\n"));
+        smt.push_str(&format!("(declare-const {f} (_ BitVec 64))(assert (= {f} (bvxor (bvxor {t2} {p1}) (bvlshr {p1} (_ bv26 64)))))\n"));
+        smt.push_str(&format!("(assert (= ((_ extract 51 0) (bvadd {p1} {f})) (_ bv{oi} 52)))\n"));
+        p0 = p1;
+        p1 = f;
+    }
+    smt.push_str("(check-sat)\n(get-value (s0 s1))\n");
+    let path = std::env::temp_dir().join(format!("v85x_{}.smt2", std::process::id()));
+    std::fs::write(&path, &smt).ok()?;
+    let out = Command::new("z3").arg("-T:30").arg(&path).output().ok()?;
+    let _ = std::fs::remove_file(&path);
+    let text = String::from_utf8_lossy(&out.stdout);
+    if !text.contains("sat") || text.starts_with("unsat") {
+        return None;
+    }
+    let h: Vec<u64> = text.split("#x").skip(1)
+        .filter_map(|s| u64::from_str_radix(&s.chars().take_while(|c| c.is_ascii_hexdigit()).collect::<String>(), 16).ok())
+        .collect();
+    if h.len() < 2 { None } else { Some((h[0], h[1])) }
+}
+
+/// Generate `n` doubles in the V8 5.1–5.3 form: batches of 62 (`(s0+s1)&mask52`)
+/// served in reverse, starting from `seed` (state before the first generated).
+pub fn generate_5x(seed: XorShift128Plus, n: usize) -> Vec<f64> {
+    let mut st = seed;
+    let mut out = Vec::with_capacity(n + BATCH_5X);
+    while out.len() < n {
+        let mut batch = Vec::with_capacity(BATCH_5X);
+        for _ in 0..BATCH_5X {
+            st.next_state();
+            batch.push((st.sum() & MANTISSA52) as f64 / P52);
+        }
+        for d in batch.into_iter().rev() {
+            if out.len() < n {
+                out.push(d);
+            }
+        }
+    }
+    out
+}
+
+/// Recover the V8 5.1–5.3 state + batch offset via z3. For batch offset `o`,
+/// `values[0..62-o]` reversed is the in-order generation prefix, which the
+/// Stage-B solver pins. Returns `(seed, offset)`; verified by full reproduction.
+pub fn recover_5x(values: &[f64]) -> Option<(XorShift128Plus, usize)> {
+    if values.len() < BATCH_5X + 8 {
+        return None;
+    }
+    for o in 0..BATCH_5X - 8 {
+        let take = BATCH_5X - o;
+        let mut win: Vec<f64> = values[..take].to_vec();
+        win.reverse();
+        let o8: Vec<u64> = win[..8].iter().map(|&x| (x * P52).round() as u64).collect();
+        let Some((s0, s1)) = z3_sum_low52(&o8) else { continue };
+        let seed = XorShift128Plus::new(s0, s1);
+        let regen = generate_5x(seed, o + values.len());
+        if regen[o..].iter().zip(values).all(|(a, b)| (a - b).abs() < 1e-15) {
+            return Some((seed, o));
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

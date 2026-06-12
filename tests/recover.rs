@@ -130,6 +130,28 @@ fn early_v8_xorshift128p_stage_b() {
 }
 
 #[test]
+fn v8_5x_reversed_sum() {
+    // Chrome 52-53 / Opera 38-40: reversed-62 cache + (s0+s1)&mask52. Needs z3.
+    if std::process::Command::new("z3").arg("--version").output().is_err() {
+        eprintln!("skip: z3 not installed");
+        return;
+    }
+    let mut tried = 0;
+    for rel in ["chrome/chrome52.txt", "chrome/chrome53.txt", "opera/opera38.txt", "opera/opera40-recap.txt"] {
+        let Some(v) = load(rel) else { continue };
+        tried += 1;
+        let (seed, off) = v8::recover_5x(&v).unwrap_or_else(|| panic!("{rel}: V8 5.x recover failed"));
+        assert!(
+            v8::generate_5x(seed, off + v.len())[off..].iter().zip(&v).all(|(a, b)| (a - b).abs() < 1e-15),
+            "{rel}: reproduction mismatch"
+        );
+    }
+    if tried == 0 {
+        eprintln!("skip: no V8 5.x fixtures");
+    }
+}
+
+#[test]
 fn internet_explorer_drand48_27_27() {
     // JScript (IE6/7/8) and early Chakra (IE9/10/11) share one generator.
     let mut tried = 0;
