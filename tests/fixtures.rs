@@ -12,27 +12,34 @@
 //! stays green.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use browser_rnd::analyze::fingerprint;
 use browser_rnd::sample::Sample;
+
+fn collect_txt(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_txt(&path, out);
+        } else if path.extension().and_then(|s| s.to_str()) == Some("txt") {
+            out.push(path);
+        }
+    }
+}
 
 #[test]
 fn fixtures_are_well_formed() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("samples");
     let mut checked = 0;
 
-    let entries = match fs::read_dir(&dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
+    let mut paths = Vec::new();
+    collect_txt(&dir, &mut paths);
+    paths.sort();
 
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("txt") {
-            continue;
-        }
-        let fname = path.file_name().unwrap().to_string_lossy().to_string();
+    for path in paths {
+        let fname = path.strip_prefix(&dir).unwrap_or(&path).to_string_lossy().to_string();
 
         let text = fs::read_to_string(&path).expect("read fixture");
         let sample = Sample::parse(&text).unwrap_or_else(|e| panic!("{fname}: parse error: {e}"));

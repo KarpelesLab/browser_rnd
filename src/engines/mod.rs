@@ -9,7 +9,9 @@
 pub mod jsc;
 pub mod jscript;
 pub mod spidermonkey;
+pub mod spidermonkey_legacy;
 pub mod v8;
+pub mod v8_legacy;
 
 /// Which browser engine a sample is believed to come from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

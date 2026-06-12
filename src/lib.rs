@@ -10,6 +10,7 @@
 
 pub mod analyze;
 pub mod engines;
+pub mod gf2;
 pub mod prng;
 pub mod sample;
 

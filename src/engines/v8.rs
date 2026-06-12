@@ -65,9 +65,113 @@ pub fn generate(mut state: XorShift128Plus, n: usize) -> Vec<f64> {
     out
 }
 
+// --- state recovery (GF(2)) -------------------------------------------------
+// xorshift128+ is linear over GF(2) and V8's output is the top 52 bits of `s0`
+// (no nonlinear integer addition, unlike SpiderMonkey/JSC), so the seed is
+// recoverable by Gaussian elimination over a handful of observed values. The
+// only unknown beyond the seed is the batch offset: the cache is global to the
+// context, so a capture rarely starts on a 64-batch boundary — we search it.
+
+use crate::gf2::solve_128;
+
+type Sym = [u128; 64]; // each entry: which seed bits XOR into this state bit
+
+fn sym_shl(x: &Sym, n: usize) -> Sym {
+    let mut o = [0u128; 64];
+    o[n..64].copy_from_slice(&x[..64 - n]);
+    o
+}
+fn sym_shr(x: &Sym, n: usize) -> Sym {
+    let mut o = [0u128; 64];
+    o[..64 - n].copy_from_slice(&x[n..64]);
+    o
+}
+fn sym_xor(a: &Sym, b: &Sym) -> Sym {
+    let mut o = [0u128; 64];
+    for i in 0..64 {
+        o[i] = a[i] ^ b[i];
+    }
+    o
+}
+
+/// Symbolic xorshift128+ step, mirroring [`XorShift128Plus::next_state`].
+fn sym_step(s0: &Sym, s1: &Sym) -> (Sym, Sym) {
+    let mut t = *s0;
+    let s0_old = *s1;
+    t = sym_xor(&t, &sym_shl(&t, 23));
+    t = sym_xor(&t, &sym_shr(&t, 17));
+    t = sym_xor(&t, &s0_old);
+    t = sym_xor(&t, &sym_shr(&s0_old, 26));
+    (s0_old, t)
+}
+
+/// Observed index `j` at batch offset `o` maps to generation index: the cache is
+/// filled gen[0..63] then served reversed, so serve[k] = gen[63 - (k mod 64)].
+fn gen_index(o: usize, j: usize) -> usize {
+    let serve = o + j;
+    (serve / 64) * 64 + (63 - serve % 64)
+}
+
+/// Recover the seed state and batch offset from observed `Math.random()` values.
+/// Returns `(seed, offset)` such that `generate(seed, offset + values.len())`
+/// reproduces the capture after dropping the first `offset` served values.
+/// Verified by full reproduction, so a `Some` result is conclusive.
+pub fn recover(values: &[f64]) -> Option<(XorShift128Plus, usize)> {
+    if values.len() < 8 {
+        return None;
+    }
+    // Symbolic s0 after (g+1) steps, for 3 batches' worth of generation indices.
+    let mut s0: Sym = std::array::from_fn(|i| 1u128 << i);
+    let mut s1: Sym = std::array::from_fn(|i| 1u128 << (64 + i));
+    let mut sym_for_gen: Vec<Sym> = Vec::with_capacity(192);
+    for _ in 0..192 {
+        let (n0, n1) = sym_step(&s0, &s1);
+        s0 = n0;
+        s1 = n1;
+        sym_for_gen.push(s0);
+    }
+
+    let n_eq = values.len().min(60);
+    for o in 0..CACHE_SIZE {
+        let mut rows: Vec<(u128, u8)> = Vec::with_capacity(n_eq * 52);
+        for j in 0..n_eq {
+            let g = gen_index(o, j);
+            if g >= sym_for_gen.len() {
+                break;
+            }
+            let m = s0_high_bits(values[j]) >> 12; // 52-bit mantissa
+            for b in 0..52 {
+                rows.push((sym_for_gen[g][12 + b], ((m >> b) & 1) as u8));
+            }
+        }
+        let Some(sol) = solve_128(rows) else { continue };
+        let seed = XorShift128Plus::new(sol as u64, (sol >> 64) as u64);
+        let regen = generate(seed, o + values.len());
+        if regen[o..]
+            .iter()
+            .zip(values)
+            .all(|(a, b)| (a - b).abs() < 1e-15)
+        {
+            return Some((seed, o));
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recover_round_trip() {
+        let seed = XorShift128Plus::new(0x1234_5678_9abc_def0, 0x0fed_cba9_8765_4321);
+        // Simulate a capture starting 5 values into a batch.
+        let full = generate(seed, 5 + 300);
+        let observed = &full[5..];
+        let (rec, off) = recover(observed).expect("recover");
+        assert_eq!(off, 5);
+        assert_eq!(generate(rec, 5 + 300)[5..], full[5..]);
+    }
 
     #[test]
     fn to_double_in_unit_interval() {
