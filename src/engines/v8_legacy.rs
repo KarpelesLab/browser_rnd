@@ -1,18 +1,22 @@
 //! Legacy V8 `Math.random()` — pre-Chrome-49 (2008–2015). Two George-Marsaglia
 //! MWC16 lanes combined into a 32-bit result, `double = r / 2^32`. No cache.
 //!
-//! Confirmed against captures + V8 source history; three eras differ only in the
-//! lane-combine and one multiplier:
+//! Confirmed against captures + V8 source history. The eras differ only in the
+//! lane-combine and which multiplier sits in the high vs low lane:
 //!
-//! | V8        | Combine                            | mult0 | mult1 | samples |
-//! |-----------|------------------------------------|-------|-------|---------|
-//! | 3.14–3.23 | `(s0<<14) + (s1 & 0x3FFFF)`        | 18273 | 36969 | chrome20/30, opera16 |
-//! | 3.24–3.30 | `(s0<<16) | (s1 & 0xFFFF)`         | 18273 | 36969 | chrome10, opera22 |
-//! | 3.31–3.32 | `(s0<<16) | (s1 & 0xFFFF)`         | 18030 | 36969 | (Marsaglia-3D fix) |
+//! | V8        | Combine                            | high-lane | low-lane | samples |
+//! |-----------|------------------------------------|-----------|----------|---------|
+//! | 1.2–~3.x  | `(hi<<16) + (lo & 0xFFFF)`         | 36969     | 18273    | chrome10 |
+//! | 3.14–3.23 | `(s0<<14) + (s1 & 0x3FFFF)`        | 18273     | 36969    | chrome20/30, opera16 |
+//! | 3.24–3.30 | `(s0<<16) | (s1 & 0xFFFF)`         | 18273     | 36969    | opera22 |
+//! | 3.31–3.32 | `(s0<<16) | (s1 & 0xFFFF)`         | 18030     | 36969    | (Marsaglia-3D fix) |
 //!
-//! Each lane: `s = mult*(s & 0xFFFF) + (s >> 16)` (mod 2^32). Recovery exploits
-//! that the low bits of `r` cleanly expose one lane, so only a small brute over
-//! the missing high bits of each lane is needed (no search of the full state).
+//! (In the original V8 1.2 form the high lane was the 36969 lane — `hi`; the 3.24
+//! math.js rewrite swapped to 18273-high. Pre-V8-1.2 / Chrome 1 had no MWC at all,
+//! just two host `libc random()` calls.) Each lane:
+//! `s = mult*(s & 0xFFFF) + (s >> 16)` (mod 2^32). `recover` tries both combines
+//! and both lane orders; it exploits that the low bits of `r` cleanly expose one
+//! lane, so only a small brute over each lane's missing high bits is needed.
 
 const P32: f64 = 4_294_967_296.0; // 2^32
 
@@ -141,6 +145,14 @@ mod tests {
     #[test]
     fn round_trip_shift16() {
         let g = Mwc { s0: 0x1234_5678, s1: 0x9abc_def0, mult0: 18273, mult1: 36969, combine: Combine::Shift16 };
+        let v = g.generate(300);
+        assert_eq!(recover(&v), Some(g));
+    }
+
+    #[test]
+    fn round_trip_v8_1_2_form() {
+        // Original V8 1.2: hi-lane = 36969, lo-lane = 18273, (hi<<16)|(lo&0xFFFF).
+        let g = Mwc { s0: 0xdead_beef, s1: 0x0bad_f00d, mult0: 36969, mult1: 18273, combine: Combine::Shift16 };
         let v = g.generate(300);
         assert_eq!(recover(&v), Some(g));
     }
