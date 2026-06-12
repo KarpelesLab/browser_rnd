@@ -13,6 +13,7 @@ pub mod spidermonkey;
 pub mod spidermonkey_legacy;
 pub mod v8;
 pub mod v8_legacy;
+pub mod v8_libc;
 
 /// Which browser engine a sample is believed to come from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -1136,6 +1136,39 @@ fn main() {
             }
             if !done { println!("  no LCG-rand x2 match"); }
         }
+        "chrome1" => {
+            // V8 0.3.9.5: lo=rand() (FIRST), hi=rand() (SECOND),
+            // result = (hi + lo/(RAND_MAX+1)) / (RAND_MAX+1).
+            // Windows: rand()=MSVCRT LCG, RAND_MAX+1=2^15, out=(s>>16)&0x7FFF.
+            // => N = hi*2^15 + lo  (first call = low 15 bits, second = high).
+            let p30 = 2f64.powi(30);
+            let n: Vec<u64> = v.iter().map(|&x| (x * p30).round() as u64).collect();
+            let m = 1u64 << 32;
+            let lcg = |s: u64| (s.wrapping_mul(214013).wrapping_add(2531011)) & (m - 1);
+            let out = |s: u64| (s >> 16) & 0x7FFF;
+            let lo0 = n[0] & 0x7FFF; // first call
+            let hi0 = n[0] >> 15;    // second call
+            let mut done = false;
+            for x in 0..(1u64 << 17) {
+                // first-call state: bits 16-30 = lo0; brute low 16 + bit 31
+                let s1 = ((x >> 16) << 31) | (lo0 << 16) | (x & 0xFFFF);
+                let s2 = lcg(s1);
+                if out(s2) != hi0 { continue; }
+                let mut st = s2;
+                let mut ok = 0usize;
+                for &want in &n[1..] {
+                    let a1 = lcg(st);  // first call (low)
+                    let a2 = lcg(a1);  // second call (high)
+                    if (out(a2) << 15) | out(a1) == want { ok += 1; st = a2; } else { break; }
+                }
+                if ok > 100 {
+                    println!("  CHROME1 MSVCRT rand x2: first-state={s1:#x} reproduced {ok}/{}", n.len() - 1);
+                    done = true;
+                    break;
+                }
+            }
+            if !done { println!("  no chrome1 match"); }
+        }
         "chakra" => {
             // ChakraCore (IE9-11): drand48 48-bit LCG, TWO steps per output,
             // value = ((sn>>21)<<27 | (seed>>21)) / 2^54. Anchor on a value<0.5
