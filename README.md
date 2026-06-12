@@ -51,28 +51,30 @@ double-conversion denominator — the first thing the fingerprint pins down.
 | Engine / era | Browsers (samples) | Grid | Algorithm | Recovery | Status |
 |---|---|---|---|---|---|
 | old SpiderMonkey | Firefox 1, 3 | 2⁻⁵³ | drand48 48-bit LCG, `(next26<<27)+next27` | 2²² brute | ✅ cracked |
-| old V8 (MWC) | Chrome 10, Opera 22 | 2⁻³² | MWC1616, mults 18273/36969 | direct lane carry | ✅ cracked |
+| V8 MWC era 1 | Chrome 20/30, Opera 16 | 2⁻³² | MWC1616, `(s0<<14)+(s1&0x3FFFF)`, 18273/36969 | lane brute | ✅ cracked |
+| V8 MWC era 2/3 | Chrome 10, Opera 22 | 2⁻³² | MWC1616, `(s0<<16)\|(s1&0xFFFF)`, 18273/18030/36969 | direct lane carry | ✅ cracked |
 | modern V8 | Chrome 77/100, Edge 100, Opera 70/75, Brave | 2⁻⁵² | xorshift128+, `s0>>12`, reversed cache of 64 | GF(2) + offset search | ✅ cracked |
-| modern SpiderMonkey | Firefox 100, Mypal 68 | 2⁻⁵³ | xorshift128+, `(s0+s1)>>11` | nonlinear (carry) → SAT/SMT | ⏳ structure known |
-| JScript | IE 6/7/8/9/10/11 | **2⁻⁵⁴** | 27+27 truncated LCG, unknown constants | LLL lattice | ⏳ structure known |
-| Presto | Opera 10 | 2⁻⁵³ | not drand48 — own generator | TBD | 🔬 investigating |
-| oldest V8 | Chrome 1 (2008) | 2⁻³⁰ | 30-bit MWC variant | TBD | 🔬 investigating |
+| modern SpiderMonkey | Firefox 100, Mypal 68 | 2⁻⁵³ | xorshift128+ (23,17,26), **low 53 bits** of `s0+s1` | **z3 SMT** | ✅ cracked |
+| **IE (JScript + Chakra)** | **IE 6/7/8/9/10/11** | **2⁻⁵⁴** | **drand48 48-bit LCG, 27+27 → 2⁵⁴** | **2²¹ brute** | ✅ cracked |
+| JSC (Safari ≤8) | *(no sample yet)* | 2⁻³² | GameRand (Ian Bullard), 2×u32 | closed-form | 🧩 modelled |
+| Presto | Opera 10 | 2⁻⁵³ | not drand48 / not xorshift128+ | TBD | 🔬 open |
+| oldest V8 | Chrome 1 (2008) | 2⁻³⁰ | 30-bit MWC variant | TBD | 🔬 open |
 
 Notable findings:
-- **JScript emits 54-bit values** (`N/2⁵⁴`), one bit wider than the 53-bit norm —
-  and genuine MSIE6/XP, not a low-precision `rand()`. drand48 constants are ruled out.
-- **V8 version split**: MWC1616 (~32-bit) before Chrome 49, xorshift128+ (52-bit,
-  reversed cache) after. The capture rarely starts on a cache boundary, so recovery
-  searches the batch offset (consistently 4–5 in practice).
-- Captures that don't reproduce and need recapture: `vivaldi1.0`, `opera40`
-  (xorshift, no offset fits), `opera16`, `chrome20`, `chrome30` (MWC lane
-  inconsistency — likely non-contiguous runs).
+- **IE 6–11 all share one generator**: drand48 (`0x5DEECE66D`,+11), two steps/call,
+  `(hi27·2²⁷ + hi27)/2⁵⁴` — same constants as old SpiderMonkey, just 54-bit. Genuine
+  MSIE6/XP. (54-bit means the low bit of any value ≥ 0.5 is rounded by f64, so recovery
+  anchors on a value < 0.5.)
+- **Modern Firefox uses the LOW 53 bits** of `s0+s1`, not `>>11`. The addition is
+  nonlinear over GF(2), so recovery uses the z3 SMT solver.
+- **V8 has 4 eras**: MWC era1 (`<<14`), era2 (`<<16`), era3 (18030), then xorshift128+
+  (Chrome 49+, 52-bit, reversed cache of 64; recovery searches the batch offset, ~4–5).
+- Captures needing recapture (non-contiguous): `vivaldi1.0`, `opera40`.
 
 ## Infra status
 
-- [x] xorshift128+ forward/backward (invertible), MWC, LCG generators
-- [x] Structural fingerprinting (mantissa resolution / grid) + UA prior
-- [x] ES3 collector (MSIE6 → modern)
-- [x] GF(2) linear solver; state recovery for drand48, MWC1616, modern V8
-- [x] `src/bin/relab.rs` reverse-engineering harness
-- [ ] modern SpiderMonkey (SAT/carry), JScript (LLL), Presto, oldest-V8 recovery
+- [x] xorshift128+ / MWC / LCG / GameRand generators (forward + recover)
+- [x] Structural fingerprinting (grid) + UA prior; ES3 collector (MSIE6 → modern)
+- [x] GF(2) linear solver (modern V8); z3 SMT backend (modern SpiderMonkey)
+- [x] `src/bin/relab.rs` reverse-engineering harness (z3 experiments)
+- [ ] Presto and oldest-V8 (chrome1) recovery; a Safari capture to validate GameRand
