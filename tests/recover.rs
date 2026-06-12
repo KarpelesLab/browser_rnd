@@ -9,7 +9,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use browser_rnd::engines::{spidermonkey_legacy, v8, v8_legacy};
+use browser_rnd::engines::{spidermonkey, spidermonkey_legacy, v8, v8_legacy};
 use browser_rnd::prng::XorShift128Plus;
 use browser_rnd::sample::Sample;
 
@@ -69,6 +69,28 @@ fn modern_v8_xorshift128p() {
     }
     if tried == 0 {
         eprintln!("skip: no modern V8 fixtures");
+    }
+}
+
+#[test]
+fn modern_spidermonkey_xorshift128p() {
+    // Needs the z3 SMT solver; skip if unavailable.
+    if std::process::Command::new("z3").arg("--version").output().is_err() {
+        eprintln!("skip: z3 not installed");
+        return;
+    }
+    let mut tried = 0;
+    for rel in ["firefox100.txt", "mypal68.txt"] {
+        let Some(v) = load(rel) else { continue };
+        tried += 1;
+        let state = spidermonkey::recover(&v).unwrap_or_else(|| panic!("{rel}: SM recover failed"));
+        assert!(
+            spidermonkey::generate(state, v.len()).iter().zip(&v).all(|(a, b)| (a - b).abs() < 1e-15),
+            "{rel}: reproduction mismatch"
+        );
+    }
+    if tried == 0 {
+        eprintln!("skip: no modern SpiderMonkey fixtures");
     }
 }
 

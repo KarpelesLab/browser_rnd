@@ -243,6 +243,250 @@ fn gen_index(o: usize, j: usize) -> usize {
     batch * 64 + (63 - pos)
 }
 
+/// GF(2) solve that returns the pivot/particular solution, IGNORING inconsistent
+/// rows (used for fixed-point iteration where carries may be wrong).
+fn solve_gf2_any(mut mat: Vec<(u128, u8)>) -> u128 {
+    let mut pivot_for_col = [usize::MAX; 128];
+    let mut r = 0usize;
+    for col in 0..128 {
+        let Some(sel) = (r..mat.len()).find(|&k| (mat[k].0 >> col) & 1 == 1) else { continue };
+        mat.swap(r, sel);
+        for k in 0..mat.len() {
+            if k != r && (mat[k].0 >> col) & 1 == 1 {
+                mat[k].0 ^= mat[r].0;
+                mat[k].1 ^= mat[r].1;
+            }
+        }
+        pivot_for_col[col] = r;
+        r += 1;
+    }
+    let mut sol = 0u128;
+    for col in 0..128 {
+        let pr = pivot_for_col[col];
+        if pr != usize::MAX && mat[pr].1 == 1 { sol |= 1u128 << col; }
+    }
+    sol
+}
+
+/// JScript via z3: solve for unknown multiplier a, increment c, and initial
+/// state of a B-bit LCG where value = (top27(s_k) << 27 | top27(s_{k+1})) / 2^54
+/// (two states per output). `hi` (top 27) is always exact; `lo` only when value
+/// < 0.5 (f64 bit0). Scans modulus B passed as arg.
+fn crack_jscript_z3(values: &[f64], b: u32) {
+    use std::process::Command;
+    let n: Vec<u64> = values.iter().map(|&x| (x * 2f64.powi(54)).round() as u64).collect();
+    let win = 24usize.min(n.len());
+    let hb = b - 1; // high bit index
+    let lb = b - 27; // low index of the top-27 window
+    let mut smt = format!("(set-logic QF_BV)\n(declare-const a (_ BitVec {b}))\n(declare-const c (_ BitVec {b}))\n(declare-const s0 (_ BitVec {b}))\n");
+    let mut cur = "s0".to_string();
+    for k in 0..win {
+        let hi = n[k] >> 27;
+        let lo = n[k] & ((1 << 27) - 1);
+        let sb = format!("sb_{k}");
+        let nx = format!("s_{k}");
+        // hi from current state
+        smt.push_str(&format!("(assert (= ((_ extract {hb} {lb}) {cur}) (_ bv{hi} 27)))\n"));
+        // step to lo-state
+        smt.push_str(&format!("(declare-const {sb} (_ BitVec {b}))\n(assert (= {sb} (bvadd (bvmul a {cur}) c)))\n"));
+        if values[k] < 0.5 {
+            smt.push_str(&format!("(assert (= ((_ extract {hb} {lb}) {sb}) (_ bv{lo} 27)))\n"));
+        }
+        // step to next output's hi-state
+        smt.push_str(&format!("(declare-const {nx} (_ BitVec {b}))\n(assert (= {nx} (bvadd (bvmul a {sb}) c)))\n"));
+        cur = nx;
+    }
+    smt.push_str("(check-sat)\n(get-value (a c s0))\n");
+    std::fs::write("/tmp/js.smt2", &smt).unwrap();
+    let out = match Command::new("z3").arg("-T:120").arg("/tmp/js.smt2").output() {
+        Ok(o) => o,
+        Err(e) => { println!("  z3 unavailable: {e}"); return; }
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let first = text.lines().next().unwrap_or("?");
+    if !text.contains("sat") || text.starts_with("unsat") {
+        println!("  B={b}: {first}");
+        return;
+    }
+    let nums: Vec<u128> = text.split("#x").skip(1)
+        .filter_map(|s| u128::from_str_radix(&s.chars().take_while(|c| c.is_ascii_hexdigit()).collect::<String>(), 16).ok())
+        .collect();
+    if nums.len() < 3 { println!("  B={b}: parse fail: {text}"); return; }
+    let (a, c, mut s) = (nums[0], nums[1], nums[2]);
+    let md = 1u128 << b;
+    let mut ok = 0;
+    for &want in &values[..win.min(values.len()).max(200).min(values.len())] {
+        let hi = (s >> (b - 27)) as u64;
+        s = (a.wrapping_mul(s) + c) % md;
+        let lo = (s >> (b - 27)) as u64;
+        s = (a.wrapping_mul(s) + c) % md;
+        let np = (hi << 27) | lo;
+        if (np as f64 / 2f64.powi(54) - want).abs() < 3.0 / 2f64.powi(54) { ok += 1; } else { break; }
+    }
+    println!("  B={b}: z3 SAT a={a} c={c} s0={} -> reproduced {ok} outputs", nums[2]);
+}
+
+/// Modern SpiderMonkey via z3, parameterized by xorshift128+ shift constants
+/// (sa,sb,sc) and output mode. mode 0: (s0+s1)>>11 ; mode 1: s0>>11.
+/// Returns Some((s0,s1)) if z3 finds a state reproducing the first `k` outputs.
+fn sm_z3_variant(o: &[u64], k: usize, sa: u32, sb: u32, sc: u32, mode: u32) -> Option<(u64, u64)> {
+    use std::process::Command;
+    let mut smt = String::from("(set-logic QF_BV)\n(declare-const s0 (_ BitVec 64))\n(declare-const s1 (_ BitVec 64))\n");
+    let (mut p0, mut p1) = ("s0".to_string(), "s1".to_string());
+    for i in 0..k {
+        let (t1, t2, f) = (format!("t1_{i}"), format!("t2_{i}"), format!("F_{i}"));
+        smt.push_str(&format!("(declare-const {t1} (_ BitVec 64))\n(assert (= {t1} (bvxor {p0} (bvshl {p0} (_ bv{sa} 64)))))\n"));
+        smt.push_str(&format!("(declare-const {t2} (_ BitVec 64))\n(assert (= {t2} (bvxor {t1} (bvlshr {t1} (_ bv{sb} 64)))))\n"));
+        smt.push_str(&format!("(declare-const {f} (_ BitVec 64))\n(assert (= {f} (bvxor (bvxor {t2} {p1}) (bvlshr {p1} (_ bv{sc} 64)))))\n"));
+        // new_s0 = p1, new_s1 = f
+        let outexpr = if mode == 0 { format!("(bvadd {p1} {f})") } else { p1.clone() };
+        smt.push_str(&format!("(assert (= ((_ extract 52 0) {outexpr}) (_ bv{} 53)))\n", o[i]));
+        p0 = p1;
+        p1 = f;
+    }
+    smt.push_str("(check-sat)\n(get-value (s0 s1))\n");
+    std::fs::write("/tmp/sm.smt2", &smt).unwrap();
+    let out = Command::new("z3").arg("-T:60").arg("/tmp/sm.smt2").output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    if !text.contains("sat") || text.starts_with("unsat") {
+        return None;
+    }
+    let hexes: Vec<u64> = text.split("#x").skip(1)
+        .filter_map(|s| u64::from_str_radix(&s.chars().take_while(|c| c.is_ascii_hexdigit()).collect::<String>(), 16).ok())
+        .collect();
+    if hexes.len() < 2 { return None; }
+    Some((hexes[0], hexes[1]))
+}
+
+/// Let z3 solve for the xorshift128+ shift constants too (sa,sb,sc unknown).
+fn sm_z3_freeshift(o: &[u64], k: usize) -> Option<(u64, u64, u32, u32, u32)> {
+    use std::process::Command;
+    let mut smt = String::from("(set-logic QF_BV)\n");
+    for v in ["s0", "s1", "sa", "sb", "sc"] {
+        smt.push_str(&format!("(declare-const {v} (_ BitVec 64))\n"));
+    }
+    for v in ["sa", "sb", "sc"] {
+        smt.push_str(&format!("(assert (bvuge {v} (_ bv1 64)))\n(assert (bvule {v} (_ bv63 64)))\n"));
+    }
+    let (mut p0, mut p1) = ("s0".to_string(), "s1".to_string());
+    for i in 0..k {
+        let (t1, t2, f) = (format!("t1_{i}"), format!("t2_{i}"), format!("F_{i}"));
+        smt.push_str(&format!("(declare-const {t1} (_ BitVec 64))\n(assert (= {t1} (bvxor {p0} (bvshl {p0} sa))))\n"));
+        smt.push_str(&format!("(declare-const {t2} (_ BitVec 64))\n(assert (= {t2} (bvxor {t1} (bvlshr {t1} sb))))\n"));
+        smt.push_str(&format!("(declare-const {f} (_ BitVec 64))\n(assert (= {f} (bvxor (bvxor {t2} {p1}) (bvlshr {p1} sc))))\n"));
+        smt.push_str(&format!("(assert (= ((_ extract 52 0) (bvadd {p1} {f})) (_ bv{} 53)))\n", o[i]));
+        p0 = p1; p1 = f;
+    }
+    smt.push_str("(check-sat)\n(get-value (s0 s1 sa sb sc))\n");
+    std::fs::write("/tmp/smfree.smt2", &smt).unwrap();
+    let out = Command::new("z3").arg("-T:300").arg("/tmp/smfree.smt2").output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    if !text.contains("sat") || text.starts_with("unsat") { return None; }
+    let h: Vec<u64> = text.split("#x").skip(1)
+        .filter_map(|s| u64::from_str_radix(&s.chars().take_while(|c| c.is_ascii_hexdigit()).collect::<String>(), 16).ok())
+        .collect();
+    // also parse decimal bvN for shifts if z3 prints them as (_ bvK 64)
+    let dec: Vec<u64> = text.split("(_ bv").skip(1)
+        .filter_map(|s| s.chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse().ok())
+        .collect();
+    let sh = if h.len() >= 5 { (h[2], h[3], h[4]) } else if dec.len() >= 3 { (dec[dec.len()-3], dec[dec.len()-2], dec[dec.len()-1]) } else { return None };
+    Some((*h.first()?, *h.get(1)?, sh.0 as u32, sh.1 as u32, sh.2 as u32))
+}
+
+fn crack_sm_z3(values: &[f64]) {
+    let base: Vec<u64> = values.iter().map(|&x| (x * 9_007_199_254_740_992.0).round() as u64).collect();
+    // Confirmed: xorshift128+ (23,17,26), output = low 53 bits of (s0+s1).
+    if let Some((s0v, s1v)) = sm_z3_variant(&base, 8, 23, 17, 26, 0) {
+        let regen = browser_rnd::engines::spidermonkey::generate(
+            browser_rnd::prng::XorShift128Plus::new(s0v, s1v), values.len());
+        let ok = regen.iter().zip(values).take_while(|(x, y)| (**x - **y).abs() < 1e-15).count();
+        println!("  z3 SAT: s0={s0v:#018x} s1={s1v:#018x} -> reproduced {ok}/{}", values.len());
+        return;
+    }
+    println!("  (23,17,26) unsat; trying free-shift/orderings...");
+    if let Some((s0v, s1v, sa, sb, sc)) = sm_z3_freeshift(&base, 6) {
+        println!("  FREE-SHIFT SAT: s0={s0v:#018x} s1={s1v:#018x} shifts=({sa},{sb},{sc})");
+        return;
+    }
+    let variants = [(23u32, 17u32, 26u32), (23, 18, 5)];
+    // try contiguous, then mid-stream window, then de-reversed batches (cache?)
+    for &cblk in &[1usize, 64, 128, 256] {
+        let mut o = base.clone();
+        if cblk > 1 {
+            let mut i = 0;
+            while i + cblk <= o.len() { o[i..i + cblk].reverse(); i += cblk; }
+        }
+        for start in [0usize, 100] {
+            let win = &o[start..];
+            for mode in [0u32, 1] {
+                for &(sa, sb, sc) in &variants {
+                    if let Some((s0v, s1v)) = sm_z3_variant(win, 8, sa, sb, sc, mode) {
+                        // verify forward from recovered state
+                        let regen = browser_rnd::engines::spidermonkey::generate(
+                            browser_rnd::prng::XorShift128Plus::new(s0v, s1v), win.len().min(64));
+                        let ok = regen.iter().zip(win)
+                            .take_while(|(x, y)| ((**x * 9_007_199_254_740_992.0).round() as u64) == **y)
+                            .count();
+                        println!("  SAT blk={cblk} start={start} shifts=({sa},{sb},{sc}) mode={mode}: s0={s0v:#018x} s1={s1v:#018x} verify {ok}");
+                        if ok > 20 { return; }
+                    }
+                }
+            }
+        }
+    }
+    println!("  all variants/orderings unsat");
+}
+
+fn crack_sm(values: &[f64]) {
+    // Modern SpiderMonkey: out = (s0+s1) >> 11 (53 bits). State GF(2)-linear;
+    // iterate: solve seed given carry guesses, recompute carries, repeat.
+    use browser_rnd::prng::XorShift128Plus;
+    let k = 12usize;
+    let o: Vec<u64> = values.iter().map(|&x| (x * 9_007_199_254_740_992.0).round() as u64).collect();
+    let mut s0: Sym = std::array::from_fn(|i| 1u128 << i);
+    let mut s1: Sym = std::array::from_fn(|i| 1u128 << (64 + i));
+    let (mut s0g, mut s1g): (Vec<Sym>, Vec<Sym>) = (vec![], vec![]);
+    for _ in 0..k {
+        let (n0, n1) = sym_step(&s0, &s1);
+        s0 = n0; s1 = n1;
+        s0g.push(s0); s1g.push(s1);
+    }
+    let mut carry = vec![[0u8; 64]; k];
+    for iter in 0..200 {
+        let mut rows = Vec::new();
+        for ki in 0..k {
+            for b in 0..53usize {
+                let p = 11 + b;
+                let coeff = s0g[ki][p] ^ s1g[ki][p];
+                let rhs = (((o[ki] >> b) & 1) as u8) ^ carry[ki][p];
+                rows.push((coeff, rhs));
+            }
+        }
+        let sol = solve_gf2_any(rows);
+        let mut st = XorShift128Plus::new(sol as u64, (sol >> 64) as u64);
+        let mut good = 0;
+        for ki in 0..k {
+            st.next_state();
+            let (a, b) = (st.s0 as u128, st.s1 as u128);
+            for p in 11..64usize {
+                let m = (1u128 << p) - 1;
+                carry[ki][p] = ((((a & m) + (b & m)) >> p) & 1) as u8;
+            }
+            if (st.s0.wrapping_add(st.s1) >> 11) == o[ki] { good += 1; }
+        }
+        if good == k {
+            // full verify against all values
+            let seed = XorShift128Plus::new(sol as u64, (sol >> 64) as u64);
+            let regen = browser_rnd::engines::spidermonkey::generate(seed, values.len());
+            let ok = regen.iter().zip(values).take_while(|(x, y)| (**x - **y).abs() < 1e-15).count();
+            println!("  converged at iter {iter}: seed=({:#018x},{:#018x}) reproduced {ok}/{}",
+                sol as u64, (sol >> 64) as u64, values.len());
+            return;
+        }
+    }
+    println!("  did not converge in 200 iters");
+}
+
 fn crack_v8_xs(values: &[f64]) {
     // Symbolic seed bits (state before step 1 of the first observed batch).
     let mut s0: Sym = [0; 64];
@@ -922,6 +1166,18 @@ fn main() {
         }
         "drand48" => crack_drand48(v),
         "v8xs" => crack_v8_xs(v),
+        "sm" => crack_sm(v),
+        "smz3" => crack_sm_z3(v),
+        "smz3test" => {
+            // self-test: synthetic SM data from a known seed
+            let syn = browser_rnd::engines::spidermonkey::generate(
+                browser_rnd::prng::XorShift128Plus::new(0x1234_5678_9abc_def0, 0x0fed_cba9_8765_4321), 300);
+            crack_sm_z3(&syn);
+        }
+        "jsz3" => {
+            let b: u32 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(48);
+            crack_jscript_z3(v, b);
+        }
         "mwc" => crack_mwc(v, 32, 16, 16),
         "mwc30" => {
             // probe a few plausible 30-bit layouts
