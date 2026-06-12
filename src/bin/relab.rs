@@ -443,6 +443,114 @@ fn main() {
                 println!("  B={b}: no solution (h={h})");
             }
         }
+        "mwce1" => {
+            // V8 era-1 MWC (3.14-3.23): r = ((s0<<14) + (s1 & 0x3FFFF)) mod 2^32,
+            // lane0 mult 18273 (or 18030 in era-3), lane1 mult 36969, double=r/2^32.
+            // r & 0x3FFF == s1 & 0x3FFF (clean), so recover lane1 then lane0.
+            let p32 = 2f64.powi(32);
+            let r: Vec<u64> = v.iter().map(|&x| (x * p32).round() as u64).collect();
+            let step = |s: u64, m: u64| (m * (s & 0xFFFF) + (s >> 16)) & 0xFFFF_FFFF;
+            for m0 in [18273u64, 18030] {
+                let m1 = 36969u64;
+                // 1) recover lane1 (mult 36969): low14 known = r&0x3FFF, brute high 18 bits
+                let lo14 = r[0] & 0x3FFF;
+                let mut s1_0 = None;
+                for hi in 0..(1u64 << 18) {
+                    let cand = (hi << 14) | lo14;
+                    let mut s = cand;
+                    let mut ok = true;
+                    for &rk in r.iter().take(150) {
+                        if s & 0x3FFF != rk & 0x3FFF { ok = false; break; }
+                        s = step(s, m1);
+                    }
+                    if ok { s1_0 = Some(cand); break; }
+                }
+                let Some(s1_0) = s1_0 else { continue };
+                // 2) recover lane0: s0&0x3FFFF = ((r - s1&0x3FFFF) mod 2^32) >> 14
+                let mut s1 = s1_0;
+                let s0_lo18: Vec<u64> = r.iter().map(|&rk| {
+                    let t = (rk + (1u64 << 32) - (s1 & 0x3FFFF)) & 0xFFFF_FFFF;
+                    let v = t >> 14;
+                    s1 = step(s1, m1);
+                    v
+                }).collect();
+                // brute high 14 bits of s0_0 (low18 known)
+                let mut s0_0 = None;
+                for hi in 0..(1u64 << 14) {
+                    let cand = (hi << 18) | s0_lo18[0];
+                    let mut s = cand;
+                    let mut ok = true;
+                    for &want in s0_lo18.iter().take(150) {
+                        if s & 0x3FFFF != want { ok = false; break; }
+                        s = step(s, m0);
+                    }
+                    if ok { s0_0 = Some(cand); break; }
+                }
+                let Some(s0_0) = s0_0 else { continue };
+                // verify full reproduction
+                let (mut a, mut b) = (s0_0, s1_0);
+                let mut okc = 0;
+                for &rk in &r {
+                    let pred = ((a << 14) + (b & 0x3FFFF)) & 0xFFFF_FFFF;
+                    if pred != rk { break; }
+                    okc += 1;
+                    a = step(a, m0); b = step(b, m1);
+                }
+                println!("  era1 m0={m0}: s0={s0_0:#x} s1={s1_0:#x} reproduced {okc}/{}", r.len());
+                if okc == r.len() { return; }
+            }
+            println!("  era1: no match");
+        }
+        "derev" => {
+            // Maybe values are served permuted (reversed batches, like V8). Try
+            // de-reversing in blocks of size C, then test full-state LCG of
+            // unknown modulus (gcd of determinant) on consecutive exact values.
+            let bb: u32 = 54;
+            let p = 2f64.powi(bb as i32);
+            let n0: Vec<i128> = v.iter().map(|&x| (x * p).round() as i128).collect();
+            let ex0: Vec<bool> = v.iter().map(|&x| x < 0.5).collect();
+            fn gcd(a: i128, b: i128) -> i128 { if b == 0 { a.abs() } else { gcd(b, a % b) } }
+            for c in [1usize, 8, 16, 32, 64, 128, 256, 512] {
+                // de-reverse blocks of size c
+                let mut n = n0.clone();
+                let mut ex = ex0.clone();
+                let mut i = 0;
+                while i + c <= n.len() {
+                    n[i..i + c].reverse();
+                    ex[i..i + c].reverse();
+                    i += c;
+                }
+                let mut g: i128 = 0;
+                let mut used = 0;
+                for k in 1..n.len() - 2 {
+                    if ex[k - 1] && ex[k] && ex[k + 1] && ex[k + 2] {
+                        let d = (n[k] - n[k - 1]) * (n[k + 2] - n[k + 1]) - (n[k + 1] - n[k]).pow(2);
+                        g = gcd(g, d);
+                        used += 1;
+                    }
+                }
+                println!("  C={c:4}: gcd(Δ)={g} (log2≈{:.2}), windows={used}",
+                    if g > 1 { (g as f64).log2() } else { 0.0 });
+            }
+        }
+        "raw" => {
+            let n: Vec<u64> = v.iter().map(|&x| (x * 2f64.powi(54)).round() as u64).collect();
+            println!("  N (54-bit) hex, and N&0xff low byte, first 24:");
+            for i in 0..24 {
+                println!("    [{i:2}] N={:014x}  hi27={:07x} lo27={:07x}  low8={:08b}",
+                    n[i], n[i] >> 27, n[i] & ((1 << 27) - 1), (n[i] & 0xff) as u8);
+            }
+            // duplicate / collision check
+            let mut sorted = n.clone();
+            sorted.sort_unstable();
+            let dups = sorted.windows(2).filter(|w| w[0] == w[1]).count();
+            println!("  duplicates among {} values: {dups}", n.len());
+            // count low-bit zero rate (parity structure)
+            for bit in 0..6 {
+                let ones = n.iter().filter(|&&x| (x >> bit) & 1 == 1).count();
+                println!("  bit {bit}: ones={ones}/{} ({:.1}%)", n.len(), 100.0 * ones as f64 / n.len() as f64);
+            }
+        }
         "bm" => {
             // Berlekamp-Massey over GF(2) on output bit-streams. Low linear
             // complexity => GF(2)-linear generator (xorshift/LFSR). High (~n/2)

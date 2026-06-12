@@ -35,18 +35,20 @@ fn old_spidermonkey_drand48() {
 }
 
 #[test]
-fn old_v8_mwc1616() {
-    // Lane-multiplier order varies by build, so recover() tries both.
+fn old_v8_mwc1616_all_eras() {
+    // Era 2/3 (<<16): opera22, chrome10. Era 1 (<<14): chrome20/30, opera16.
     let mut tried = 0;
-    for rel in ["v8/opera22.txt", "chrome10.txt"] {
+    for rel in ["v8/opera22.txt", "chrome10.txt", "chrome20.txt", "chrome30.txt", "v8/opera16.txt"] {
         let Some(v) = load(rel) else { continue };
         tried += 1;
-        let (s0, s1, m0, m1) = v8_legacy::recover(&v).unwrap_or_else(|| panic!("{rel}: mwc1616"));
-        let regen = v8_legacy::generate_with(s0, s1, m0, m1, v.len());
-        assert!(regen.iter().zip(&v).all(|(a, b)| (a - b).abs() < 1e-15), "{rel}");
+        let mwc = v8_legacy::recover(&v).unwrap_or_else(|| panic!("{rel}: mwc recover failed"));
+        assert!(
+            mwc.generate(v.len()).iter().zip(&v).all(|(a, b)| (a - b).abs() < 1e-15),
+            "{rel}: reproduction mismatch"
+        );
     }
     if tried == 0 {
-        eprintln!("skip: no MWC1616 fixtures");
+        eprintln!("skip: no MWC fixtures");
     }
 }
 

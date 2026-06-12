@@ -1,84 +1,137 @@
-//! Legacy V8 `Math.random()` — pre-Chrome-49 (2008–2015), e.g. Chrome 10/20/30,
-//! Opera 15–35.
+//! Legacy V8 `Math.random()` — pre-Chrome-49 (2008–2015). Two George-Marsaglia
+//! MWC16 lanes combined into a 32-bit result, `double = r / 2^32`. No cache.
 //!
-//! Two independent George-Marsaglia MWC16 lanes combined into a 32-bit result:
-//! ```text
-//! s0 = 18273 * (s0 & 0xffff) + (s0 >> 16)
-//! s1 = 36969 * (s1 & 0xffff) + (s1 >> 16)
-//! r  = ((s0 & 0xffff) << 16) | (s1 & 0xffff)
-//! double = r * 2^-32
-//! ```
-//! No cache/reversal (that came with the xorshift128+ rewrite), so the stream is
-//! contiguous from the first observed value. Confirmed by full reproduction of
-//! `samples/v8/opera22.txt` (see `tests/recover.rs`).
+//! Confirmed against captures + V8 source history; three eras differ only in the
+//! lane-combine and one multiplier:
 //!
-//! Recovery: `r` directly exposes the low 16 bits of each lane; the missing high
-//! 16 bits of a lane follow from two consecutive lows via the MWC carry
-//! relation, so no search is needed.
+//! | V8        | Combine                            | mult0 | mult1 | samples |
+//! |-----------|------------------------------------|-------|-------|---------|
+//! | 3.14–3.23 | `(s0<<14) + (s1 & 0x3FFFF)`        | 18273 | 36969 | chrome20/30, opera16 |
+//! | 3.24–3.30 | `(s0<<16) | (s1 & 0xFFFF)`         | 18273 | 36969 | chrome10, opera22 |
+//! | 3.31–3.32 | `(s0<<16) | (s1 & 0xFFFF)`         | 18030 | 36969 | (Marsaglia-3D fix) |
+//!
+//! Each lane: `s = mult*(s & 0xFFFF) + (s >> 16)` (mod 2^32). Recovery exploits
+//! that the low bits of `r` cleanly expose one lane, so only a small brute over
+//! the missing high bits of each lane is needed (no search of the full state).
 
-const MULT0: u64 = 18273;
-const MULT1: u64 = 36969;
 const P32: f64 = 4_294_967_296.0; // 2^32
-const M16: u64 = 1 << 16;
+
+/// How the two lanes are folded into the 32-bit result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Combine {
+    /// Era 1: `(s0 << 14) + (s1 & 0x3FFFF)` (mod 2^32).
+    Shift14,
+    /// Era 2/3: `(s0 << 16) | (s1 & 0xFFFF)`.
+    Shift16,
+}
+
+/// A fully-specified legacy-V8 MWC generator.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Mwc {
+    pub s0: u32,
+    pub s1: u32,
+    pub mult0: u64,
+    pub mult1: u64,
+    pub combine: Combine,
+}
 
 #[inline]
-fn lane_step(s: u32, mult: u64) -> u32 {
-    (mult * ((s as u64) & 0xFFFF) + ((s as u64) >> 16)) as u32
+fn step(s: u32, mult: u64) -> u32 {
+    ((mult * ((s as u64) & 0xFFFF) + ((s as u64) >> 16)) & 0xFFFF_FFFF) as u32
 }
 
-/// Generate `n` doubles from the two 32-bit lane states.
-pub fn generate(mut s0: u32, mut s1: u32, n: usize) -> Vec<f64> {
-    let mut out = Vec::with_capacity(n);
-    for _ in 0..n {
-        let r = (((s0 as u64) & 0xFFFF) << 16) | ((s1 as u64) & 0xFFFF);
-        out.push(r as f64 / P32);
-        s0 = lane_step(s0, MULT0);
-        s1 = lane_step(s1, MULT1);
+#[inline]
+fn combine(a: u32, b: u32, c: Combine) -> u64 {
+    match c {
+        Combine::Shift14 => (((a as u64) << 14) + ((b as u64) & 0x3FFFF)) & 0xFFFF_FFFF,
+        Combine::Shift16 => (((a as u64) & 0xFFFF) << 16) | ((b as u64) & 0xFFFF),
     }
-    out
 }
 
-/// Recover the missing high 16 bits of a lane from two consecutive lows.
-fn lane_seed(lo0: u64, lo1: u64, mult: u64) -> u32 {
-    let hi0 = (lo1 + M16 - (mult * lo0) % M16) % M16;
-    ((hi0 << 16) | lo0) as u32
+impl Mwc {
+    /// Generate `n` doubles from this generator's state.
+    pub fn generate(&self, n: usize) -> Vec<f64> {
+        let (mut a, mut b) = (self.s0, self.s1);
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            out.push(combine(a, b, self.combine) as f64 / P32);
+            a = step(a, self.mult0);
+            b = step(b, self.mult1);
+        }
+        out
+    }
 }
 
-/// Recover both lane states (the seed producing `values[0]`) from observed
-/// outputs. The multiplier-to-lane assignment varies across V8 builds, so we try
-/// both orders and return whichever reproduces the sequence. Verified by full
-/// reproduction, so `Some` is conclusive. Returns `(s0, s1, mult0, mult1)`.
-pub fn recover(values: &[f64]) -> Option<(u32, u32, u64, u64)> {
-    if values.len() < 3 {
+fn reproduces(m: &Mwc, values: &[f64]) -> bool {
+    m.generate(values.len())
+        .iter()
+        .zip(values)
+        .all(|(x, y)| (x - y).abs() < 1e-15)
+}
+
+/// Recover a legacy-V8 MWC generator from observed outputs, trying every era and
+/// multiplier assignment. Verified by full reproduction, so `Some` is conclusive.
+pub fn recover(values: &[f64]) -> Option<Mwc> {
+    if values.len() < 4 {
         return None;
     }
     let r: Vec<u64> = values.iter().map(|&v| (v * P32).round() as u64).collect();
-    let a: Vec<u64> = r.iter().map(|x| (x >> 16) & 0xFFFF).collect();
-    let b: Vec<u64> = r.iter().map(|x| x & 0xFFFF).collect();
-    for (m0, m1) in [(MULT0, MULT1), (MULT1, MULT0)] {
-        let s0 = lane_seed(a[0], a[1], m0);
-        let s1 = lane_seed(b[0], b[1], m1);
-        if generate_with(s0, s1, m0, m1, values.len())
-            .iter()
-            .zip(values)
-            .all(|(x, y)| (x - y).abs() < 1e-15)
-        {
-            return Some((s0, s1, m0, m1));
+    let pairs = [(18273u64, 36969u64), (36969, 18273), (18030, 36969), (36969, 18030)];
+    for &(m0, m1) in &pairs {
+        if let Some(m) = recover_shift16(&r, m0, m1).filter(|m| reproduces(m, values)) {
+            return Some(m);
+        }
+        if let Some(m) = recover_shift14(&r, m0, m1).filter(|m| reproduces(m, values)) {
+            return Some(m);
         }
     }
     None
 }
 
-/// Generate with explicit per-lane multipliers (for the recovered assignment).
-pub fn generate_with(mut s0: u32, mut s1: u32, mult0: u64, mult1: u64, n: usize) -> Vec<f64> {
-    let mut out = Vec::with_capacity(n);
-    for _ in 0..n {
-        let r = (((s0 as u64) & 0xFFFF) << 16) | ((s1 as u64) & 0xFFFF);
-        out.push(r as f64 / P32);
-        s0 = lane_step(s0, mult0);
-        s1 = lane_step(s1, mult1);
-    }
-    out
+/// Era 2/3: `r>>16 == s0&0xFFFF`, `r&0xFFFF == s1&0xFFFF`; recover the missing
+/// high 16 bits of each lane from two consecutive lows via the carry relation.
+fn recover_shift16(r: &[u64], m0: u64, m1: u64) -> Option<Mwc> {
+    const M: u64 = 1 << 16;
+    let lane_seed = |lo0: u64, lo1: u64, mult: u64| -> u32 {
+        let hi0 = (lo1 + M - (mult * lo0) % M) % M;
+        ((hi0 << 16) | lo0) as u32
+    };
+    let s0 = lane_seed((r[0] >> 16) & 0xFFFF, (r[1] >> 16) & 0xFFFF, m0);
+    let s1 = lane_seed(r[0] & 0xFFFF, r[1] & 0xFFFF, m1);
+    Some(Mwc { s0, s1, mult0: m0, mult1: m1, combine: Combine::Shift16 })
+}
+
+/// Era 1: `r & 0x3FFF == s1 & 0x3FFF` (the `<<14` lane contributes nothing below
+/// bit 14). Recover lane1 by bruting its high 18 bits, then derive lane0's low
+/// 18 bits from `r` and brute its high 14 bits.
+fn recover_shift14(r: &[u64], m0: u64, m1: u64) -> Option<Mwc> {
+    let check = r.len().min(150);
+    // lane1 (the & 0x3FFFF lane, mult m1)
+    let lo14 = r[0] & 0x3FFF;
+    let s1 = (0..(1u64 << 18)).map(|hi| (hi << 14) | lo14).find(|&cand| {
+        let mut s = cand as u32;
+        r[..check].iter().all(|&rk| {
+            let ok = (s as u64) & 0x3FFF == rk & 0x3FFF;
+            s = step(s, m1);
+            ok
+        })
+    })? as u32;
+    // lane0 low 18 bits: ((r - s1&0x3FFFF) mod 2^32) >> 14
+    let mut b = s1;
+    let s0_lo18: Vec<u64> = r.iter().map(|&rk| {
+        let t = (rk + (1u64 << 32) - ((b as u64) & 0x3FFFF)) & 0xFFFF_FFFF;
+        b = step(b, m1);
+        t >> 14
+    }).collect();
+    let s0 = (0..(1u64 << 14)).map(|hi| (hi << 18) | s0_lo18[0]).find(|&cand| {
+        let mut s = cand as u32;
+        s0_lo18[..check].iter().all(|&want| {
+            let ok = (s as u64) & 0x3FFFF == want;
+            s = step(s, m0);
+            ok
+        })
+    })? as u32;
+    Some(Mwc { s0, s1, mult0: m0, mult1: m1, combine: Combine::Shift14 })
 }
 
 #[cfg(test)]
@@ -86,10 +139,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn recover_round_trip() {
-        let vals = generate(0x1234_5678, 0x9abc_def0, 300);
-        let (s0, s1, m0, m1) = recover(&vals).expect("recover");
-        assert_eq!((s0, s1), (0x1234_5678, 0x9abc_def0));
-        assert_eq!((m0, m1), (MULT0, MULT1));
+    fn round_trip_shift16() {
+        let g = Mwc { s0: 0x1234_5678, s1: 0x9abc_def0, mult0: 18273, mult1: 36969, combine: Combine::Shift16 };
+        let v = g.generate(300);
+        assert_eq!(recover(&v), Some(g));
+    }
+
+    #[test]
+    fn round_trip_shift14() {
+        let g = Mwc { s0: 0x2cc7_3809, s1: 0x2955_07fb, mult0: 18273, mult1: 36969, combine: Combine::Shift14 };
+        let v = g.generate(300);
+        assert_eq!(recover(&v), Some(g));
     }
 }
