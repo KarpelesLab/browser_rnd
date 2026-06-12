@@ -22,7 +22,7 @@ fn load(rel: &str) -> Option<Vec<f64>> {
 #[test]
 fn old_spidermonkey_drand48() {
     let mut tried = 0;
-    for rel in ["spidermonkey/firefox1-winxp.txt", "firefox3.txt"] {
+    for rel in ["firefox/firefox1-winxp.txt", "firefox/firefox3.txt"] {
         let Some(v) = load(rel) else { continue };
         tried += 1;
         let seed = spidermonkey_legacy::recover(&v).unwrap_or_else(|| panic!("{rel}: drand48"));
@@ -36,7 +36,7 @@ fn old_spidermonkey_drand48() {
 
 #[test]
 fn oldest_v8_chrome1_libc_rand() {
-    let Some(v) = load("v8/chrome1-2008.txt") else {
+    let Some(v) = load("chrome/chrome1-2008.txt") else {
         eprintln!("skip: fixture missing");
         return;
     };
@@ -48,7 +48,7 @@ fn oldest_v8_chrome1_libc_rand() {
 fn old_v8_mwc1616_all_eras() {
     // Era 2/3 (<<16): opera22, chrome10. Era 1 (<<14): chrome20/30, opera16.
     let mut tried = 0;
-    for rel in ["v8/opera22.txt", "chrome10.txt", "chrome20.txt", "chrome30.txt", "v8/opera16.txt"] {
+    for rel in ["opera/opera22.txt", "chrome/chrome10.txt", "chrome/chrome20.txt", "chrome/chrome30.txt", "opera/opera16.txt"] {
         let Some(v) = load(rel) else { continue };
         tried += 1;
         let mwc = v8_legacy::recover(&v).unwrap_or_else(|| panic!("{rel}: mwc recover failed"));
@@ -66,7 +66,7 @@ fn old_v8_mwc1616_all_eras() {
 fn modern_v8_xorshift128p() {
     // Any one modern V8 capture proves the path; try a few.
     let mut tried = 0;
-    for rel in ["chrome100_win10.txt", "edge100.txt", "chrome77_android4.4.txt", "brave1.0.txt", "opera75.txt"] {
+    for rel in ["chrome/chrome100-win10.txt", "edge/edge100.txt", "chrome/chrome77-android4.4.txt", "brave/brave1.0.txt", "opera/opera75.txt"] {
         let Some(v) = load(rel) else { continue };
         tried += 1;
         let (seed, off) = v8::recover(&v)
@@ -88,7 +88,7 @@ fn internet_explorer_drand48_27_27() {
     let mut tried = 0;
     for rel in [
         "ie/ie6-winxp.txt", "ie/ie7-winxp.txt", "ie/ie8-winxp.txt",
-        "ie/ie9-vista.txt", "ie10.txt", "ie11.txt",
+        "ie/ie9-vista.txt", "ie/ie10.txt", "ie/ie11.txt",
     ] {
         let Some(v) = load(rel) else { continue };
         tried += 1;
@@ -111,7 +111,7 @@ fn modern_spidermonkey_xorshift128p() {
         return;
     }
     let mut tried = 0;
-    for rel in ["firefox100.txt", "mypal68.txt"] {
+    for rel in ["firefox/firefox100.txt", "mypal/mypal68.txt"] {
         let Some(v) = load(rel) else { continue };
         tried += 1;
         let state = spidermonkey::recover(&v).unwrap_or_else(|| panic!("{rel}: SM recover failed"));

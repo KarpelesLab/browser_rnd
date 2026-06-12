@@ -4,12 +4,24 @@ Each file here is a real `Math.random()` capture from `collector/index.html`,
 saved verbatim. They are committed on purpose: they are the ground truth the
 engine models and recovery code are tested against.
 
-## Naming / layout
+## Layout
 
-Free-form, named after the browser + version (+ OS where it matters), e.g.
-`firefox100.txt`, `chrome30.txt`, `ie10.txt`, `mypal68.txt`. Some are grouped
-into family subdirectories (`ie/`, `v8/`, `spidermonkey/`, `presto/`); the tests
-walk subdirectories, so either location is fine.
+One directory per **vendor**, files named `<browser><version>[-os].txt`. This
+keeps each version-sweep together (handy for studying when an engine changed its
+generator). The tests walk subdirectories recursively. Which generator each
+vendor dir maps to (see the root README's status table for details):
+
+| Dir | Engine | Generators across the versions here |
+|---|---|---|
+| `chrome/`  | V8 | libc `rand()`×2 (1) → MWC (10–46) → xorshift128+ (49+) |
+| `opera/`   | Presto then V8 | SNOW 2.0 CSPRNG (≤12) → MWC (15–35) → xorshift128+ (40+) |
+| `firefox/` | SpiderMonkey | drand48 (1–3) → xorshift128+ (≥49) |
+| `ie/`      | JScript / Chakra | drand48 27+27 (all of 6–11) |
+| `edge/`, `brave/`, `vivaldi/` | V8 | xorshift128+ |
+| `mypal/`   | SpiderMonkey (Goanna) | xorshift128+ |
+
+(The chrome 28–50 and firefox 24–50 captures bracket the MWC→xorshift and
+drand48→xorshift transitions; opera 10.50/11.60 are later Presto.)
 
 ## How to add one
 
