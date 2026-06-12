@@ -14,7 +14,7 @@ engines:
 |---|---|---|---|---|
 | **V8** | Chrome, Edge, Opera, Brave, Node | xorshift128+ | `bitcast((s0>>12)\|exp) - 1` (52-bit) | **reversed** cache of 64 |
 | **SpiderMonkey** | Firefox | xorshift128+ | `((s0+s1) & (2⁵³-1)) * 2⁻⁵³` (**low** 53) | in order |
-| **JavaScriptCore** | Safari, iOS | xorshift128+ *(extraction TBD — no sample)* | — | in order |
+| **JavaScriptCore** | Safari ≤8, iOS | GameRand (2×u32) | `m_high / 2³²` (32-bit) | in order |
 
 The conversion is the part that distinguishes them: V8 reads `s0` directly (so
 its recovery is GF(2)-linear), while SpiderMonkey/JSC sum both lanes (`s0+s1`,
@@ -70,7 +70,7 @@ double-conversion denominator — the first thing the fingerprint pins down.
 | modern V8 | Chrome 77/100, Edge 100, Opera 70/75, Brave | 2⁻⁵² | xorshift128+, `s0>>12`, reversed cache of 64 | GF(2) + offset search | ✅ cracked |
 | modern SpiderMonkey | Firefox 100, Mypal 68 | 2⁻⁵³ | xorshift128+ (23,17,26), **low 53 bits** of `s0+s1` | **z3 SMT** | ✅ cracked |
 | **IE (JScript + Chakra)** | **IE 6/7/8/9/10/11** | **2⁻⁵⁴** | **drand48 48-bit LCG, 27+27 → 2⁵⁴** | **2²¹ brute** | ✅ cracked |
-| JSC (Safari ≤8) | *(no sample yet)* | 2⁻³² | GameRand (Ian Bullard), 2×u32 | closed-form | 🧩 modelled |
+| JSC (Safari ≤8) | Safari 5.1.7 | 2⁻³² | GameRand (Ian Bullard), 2×u32 | closed-form | ✅ cracked |
 | Presto | Opera 10 | 2⁻⁵³ | **SNOW 2.0 CSPRNG** + entropy reseeding | **infeasible by design** | 🔒 unpredictable |
 | oldest V8 | Chrome 1 (2008, Win) | 2⁻³⁰ | MSVCRT `rand()` × 2, `hi·2¹⁵+lo` | 2¹⁷ brute | ✅ cracked |
 

@@ -1,12 +1,12 @@
 //! JavaScriptCore `Math.random()` — Safari / iOS WebViews.
 //!
 //! VERSION SPLIT:
-//!  - Safari ≤ 8 (2014) used **WeakRandom = "GameRand"** (Ian Bullard, 2009): a
-//!    tiny 64-bit-state PRNG (two 32-bit words), output `m_high / 2^32` → grid
-//!    2⁻³². This module implements that (the documented algorithm).
+//!  - Safari ≤ 8 used **WeakRandom = "GameRand"** (Ian Bullard, 2009): a tiny
+//!    64-bit-state PRNG (two 32-bit words), output `m_high / 2^32` → grid 2⁻³².
+//!    CONFIRMED: reproduces `samples/safari/safari5.1.7-winxp.txt` 4096/4096, so
+//!    GameRand was in use by at least Safari 5.1.7 (2012).
 //!  - Safari ≥ 9 switched WeakRandom to **xorshift128+** (like V8/SpiderMonkey),
-//!    with JSC's own double conversion — modelled in [`super::jsc_modern`] once a
-//!    capture is available to pin the extraction.
+//!    with JSC's own double conversion — TBD pending a Safari 9+ capture.
 //!
 //! GameRand (runtime/WeakRandom.h):
 //! ```text

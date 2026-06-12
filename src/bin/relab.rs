@@ -617,6 +617,16 @@ fn main() {
                 None => println!("grid 2^-{grid} | UNIDENTIFIED (likely Presto/CSPRNG or new variant)"),
             }
         }
+        "jsc" => {
+            match browser_rnd::engines::jsc::recover(v) {
+                Some(st) => {
+                    let regen = browser_rnd::engines::jsc::generate(st, v.len());
+                    let ok = regen.iter().zip(v).take_while(|(a, b)| (**a - **b).abs() < 1e-15).count();
+                    println!("  JSC GameRand: low={:#010x} high={:#010x} reproduced {ok}/{}", st.low, st.high, v.len());
+                }
+                None => println!("  not JSC GameRand"),
+            }
+        }
         "conv" => conv(v),
         "jstlcg" => {
             // JScript hypothesis: value = (top27(s_a)<<27 | top27(s_b)) / 2^54,

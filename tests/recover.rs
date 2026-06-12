@@ -9,7 +9,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use browser_rnd::engines::{jscript, spidermonkey, spidermonkey_legacy, v8, v8_legacy, v8_libc};
+use browser_rnd::engines::{jsc, jscript, spidermonkey, spidermonkey_legacy, v8, v8_legacy, v8_libc};
 use browser_rnd::prng::XorShift128Plus;
 use browser_rnd::sample::Sample;
 
@@ -32,6 +32,16 @@ fn old_spidermonkey_drand48() {
     if tried == 0 {
         eprintln!("skip: no drand48 fixtures");
     }
+}
+
+#[test]
+fn safari_jsc_gamerand() {
+    let Some(v) = load("safari/safari5.1.7-winxp.txt") else {
+        eprintln!("skip: fixture missing");
+        return;
+    };
+    let state = jsc::recover(&v).expect("GameRand recover failed");
+    assert!(jsc::generate(state, v.len()).iter().zip(&v).all(|(a, b)| (a - b).abs() < 1e-15));
 }
 
 #[test]

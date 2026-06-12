@@ -17,6 +17,7 @@ vendor dir maps to (see the root README's status table for details):
 | `opera/`   | Presto then V8 | SNOW 2.0 CSPRNG (≤12) → MWC (15–35) → xorshift128+ (40+) |
 | `firefox/` | SpiderMonkey | drand48 (1–3) → xorshift128+ (≥49) |
 | `ie/`      | JScript / Chakra | drand48 27+27 (all of 6–11) |
+| `safari/`  | JavaScriptCore | GameRand (Safari ≤8) |
 | `edge/`, `brave/`, `vivaldi/` | V8 | xorshift128+ |
 | `mypal/`   | SpiderMonkey (Goanna) | xorshift128+ |
 
