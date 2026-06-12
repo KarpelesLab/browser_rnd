@@ -307,6 +307,352 @@ fn main() {
     println!("loaded {} values from {}", v.len(), args[2]);
     match exp.as_str() {
         "conv" => conv(v),
+        "jstlcg" => {
+            // JScript hypothesis: value = (top27(s_a)<<27 | top27(s_b)) / 2^54,
+            // two consecutive LCG states s_a,s_b per output, state B bits, LCG
+            // s' = M*s + A mod 2^B, output reads top 27 bits (h = B-27 hidden).
+            // hi_k, lo_k, hi_{k+1} are top27 of THREE consecutive states, so
+            // brute their h hidden bits each -> M, A directly.
+            let p54 = 2f64.powi(54);
+            let n: Vec<u64> = v.iter().map(|&x| (x * p54).round() as u64).collect();
+            let k0 = (0..n.len() - 1).find(|&k| v[k] < 0.5).unwrap();
+            let hi0 = n[k0] >> 27;
+            let lo0 = n[k0] & ((1 << 27) - 1);
+            let hi1 = n[k0 + 1] >> 27;
+            let modinv = |a: u128, md: u128| -> u128 {
+                let mut x = 1u128;
+                for _ in 0..8 {
+                    x = x.wrapping_mul(2u128.wrapping_sub(a.wrapping_mul(x))) % md;
+                }
+                x % md
+            };
+            let verify = |s_start: u128, m: u128, a: u128, b: u32, h: u32| -> usize {
+                let md = 1u128 << b;
+                let mut state = s_start;
+                let mut ok = 0;
+                for j in k0..n.len() {
+                    let u = state;
+                    let w = (m * u + a) % md;
+                    let np = ((u >> h) << 27) | (w >> h);
+                    if (np as f64 / p54 - v[j]).abs() < 1.5 / p54 * 2.0 {
+                        ok += 1;
+                    } else {
+                        break;
+                    }
+                    state = (m * w + a) % md;
+                }
+                ok
+            };
+            let mut cracked = false;
+            for b in 27..=40u32 {
+                let h = b - 27;
+                if h > 9 {
+                    continue;
+                }
+                let md = 1u128 << b;
+                let lim = 1u64 << h;
+                'search: for r0 in 0..lim {
+                    let s0 = ((hi0 << h) | r0) as u128;
+                    for r1 in 0..lim {
+                        let s1 = ((lo0 << h) | r1) as u128;
+                        let d0 = (s1 + md - s0) % md;
+                        if d0 & 1 == 0 {
+                            continue;
+                        }
+                        let inv = modinv(d0, md);
+                        for r2 in 0..lim {
+                            let s2 = ((hi1 << h) | r2) as u128;
+                            let m = ((s2 + md - s1) % md) * inv % md;
+                            let a = (s1 + md - (m * s0) % md) % md;
+                            if verify(s0, m, a, b, h) > 200 {
+                                let full = verify(s0, m, a, b, h);
+                                println!("  B={b} M={m} A={a} -> reproduced {full}/{} from k0={k0}", n.len() - k0);
+                                cracked = true;
+                                break 'search;
+                            }
+                        }
+                    }
+                }
+                if cracked {
+                    break;
+                }
+                println!("  B={b}: no solution (h={h})");
+            }
+        }
+        "jstlcg1" => {
+            // Single-step hypothesis: value = (state >> h) / 2^54 from a B-bit
+            // LCG (B = 54 + h), one step per output. N_k,N_{k+1},N_{k+2} = top54
+            // of three consecutive states; brute h hidden bits each -> M,A.
+            let p54 = 2f64.powi(54);
+            let n: Vec<u64> = v.iter().map(|&x| (x * p54).round() as u64).collect();
+            // anchor: three consecutive values < 0.5 so N is exact
+            let k0 = (0..n.len() - 2)
+                .find(|&k| v[k] < 0.5 && v[k + 1] < 0.5 && v[k + 2] < 0.5)
+                .unwrap();
+            let (t0, t1, t2) = (n[k0] as u128, n[k0 + 1] as u128, n[k0 + 2] as u128);
+            let modinv = |a: u128, md: u128| -> u128 {
+                let mut x = 1u128;
+                for _ in 0..8 {
+                    x = x.wrapping_mul(2u128.wrapping_sub(a.wrapping_mul(x))) % md;
+                }
+                x % md
+            };
+            let mut cracked = false;
+            for b in 54..=64u32 {
+                let h = b - 54;
+                if h > 9 {
+                    continue;
+                }
+                let md = 1u128 << b;
+                let lim = 1u64 << h;
+                'search: for r0 in 0..lim {
+                    let s0 = (t0 << h) | r0 as u128;
+                    for r1 in 0..lim {
+                        let s1 = (t1 << h) | r1 as u128;
+                        let d0 = (s1 + md - s0) % md;
+                        if d0 & 1 == 0 {
+                            continue;
+                        }
+                        let inv = modinv(d0, md);
+                        for r2 in 0..lim {
+                            let s2 = (t2 << h) | r2 as u128;
+                            let m = ((s2 + md - s1) % md) * inv % md;
+                            let a = (s1 + md - (m * s0) % md) % md;
+                            // verify forward from s0
+                            let mut state = s0;
+                            let mut ok = 0;
+                            for j in k0..n.len() {
+                                if ((state >> h) as f64 / p54 - v[j]).abs() < 3.0 / p54 {
+                                    ok += 1;
+                                } else {
+                                    break;
+                                }
+                                state = (m * state + a) % md;
+                            }
+                            if ok > 200 {
+                                println!("  B={b} M={m} A={a} -> reproduced {ok}/{} from k0={k0}", n.len() - k0);
+                                cracked = true;
+                                break 'search;
+                            }
+                        }
+                    }
+                }
+                if cracked {
+                    break;
+                }
+                println!("  B={b}: no solution (h={h})");
+            }
+        }
+        "bm" => {
+            // Berlekamp-Massey over GF(2) on output bit-streams. Low linear
+            // complexity => GF(2)-linear generator (xorshift/LFSR). High (~n/2)
+            // => nonlinear over GF(2) (LCG/MWC with integer-multiply carries).
+            let bits: u32 = 54; // values are N/2^54
+            let n: Vec<u64> = v.iter().map(|&x| (x * 2f64.powi(bits as i32)).round() as u64).collect();
+            fn bm_gf2(s: &[u8]) -> usize {
+                let n = s.len();
+                let mut b = vec![0u8; n];
+                let mut c = vec![0u8; n];
+                b[0] = 1; c[0] = 1;
+                let mut l = 0usize;
+                let mut m: i64 = -1;
+                for i in 0..n {
+                    let mut d = s[i];
+                    for j in 1..=l { d ^= c[j] & s[i - j]; }
+                    if d == 1 {
+                        let t = c.clone();
+                        let shift = (i as i64 - m) as usize;
+                        for j in 0..n - shift { c[j + shift] ^= b[j]; }
+                        if 2 * l <= i { l = i + 1 - l; m = i as i64; b = t; }
+                    }
+                }
+                l
+            }
+            // test several high bit positions (always exact: bit >= 1)
+            for bp in [53u32, 50, 45, 40, 30] {
+                let s: Vec<u8> = n.iter().map(|&x| ((x >> bp) & 1) as u8).collect();
+                let l = bm_gf2(&s);
+                println!("  bit {bp}: linear complexity = {l} / {} samples", s.len());
+            }
+        }
+        "lcgmod" => {
+            // Full-state LCG with UNKNOWN modulus m (possibly odd/prime):
+            // N_{i+1}=a N_i + c mod m  =>  (N2-N1)^2 ≡ (N1-N0)(N3-N2) mod m.
+            // So m | Δ = (N2-N1)^2 - (N1-N0)(N3-N2); gcd over many windows = m.
+            let b: u32 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(54);
+            let p = 2f64.powi(b as i32);
+            let n: Vec<i128> = v.iter().map(|&x| (x * p).round() as i128).collect();
+            let ex = |i: usize| v[i] < 0.5;
+            fn gcd(a: i128, b: i128) -> i128 { if b == 0 { a.abs() } else { gcd(b, a % b) } }
+            let mut g: i128 = 0;
+            let mut used = 0;
+            for k in 1..n.len() - 2 {
+                if ex(k - 1) && ex(k) && ex(k + 1) && ex(k + 2) {
+                    let delta = (n[k] - n[k - 1]) * (n[k + 2] - n[k + 1]) - (n[k + 1] - n[k]).pow(2);
+                    g = gcd(g, delta);
+                    used += 1;
+                    if used > 60 && g != 0 { /* enough */ }
+                }
+            }
+            println!("  windows used={used}, gcd(Δ) = {g}");
+            if g != 0 {
+                // factor out small spurious factors: report g and g/small
+                println!("  candidate modulus m = {g}");
+                println!("  log2(m) ≈ {:.3}", (g as f64).log2());
+            }
+        }
+        "jsknown" => {
+            // 27+27 truncated LCG with a KNOWN multiplier (h up to ~25): brute
+            // only the first state-difference's hidden bits (2^(h+1)).
+            let p54 = 2f64.powi(54);
+            let nvals: Vec<u64> = v.iter().map(|&x| (x * p54).round() as u64).collect();
+            let mut t = Vec::new();
+            let mut ex = Vec::new();
+            for (k, &n) in nvals.iter().enumerate() {
+                t.push((n >> 27) as u128); ex.push(true);
+                t.push((n & ((1 << 27) - 1)) as u128); ex.push(v[k] < 0.5);
+            }
+            let p = (0..t.len() - 4).find(|&i| (0..4).all(|j| ex[i + j])).unwrap();
+            let mults: [u128; 16] = [
+                25214903917, 214013, 1103515245, 1664525, 22695477, 134775813,
+                69069, 1812433253, 1566083941, 1597334677, 16843009, 0x5851F42D4C957F2D,
+                6364136223846793005, 2862933555777941757, 3935559000370003845, 44485709377909,
+            ];
+            let mut cracked = false;
+            for b in [40u32, 42, 44, 46, 48, 50, 52, 53, 54] {
+                let h = b - 27;
+                if h > 26 { continue; }
+                let md = 1u128 << b;
+                let d0t = t[p + 1] as i128 - t[p] as i128;
+                for &a in &mults {
+                    let a = a % md;
+                    let span = 1i128 << h;
+                    for dd0 in -span + 1..span {
+                        let d0 = ((d0t * (1 << h) + dd0).rem_euclid(md as i128)) as u128;
+                        let mut s = t[p] << h;
+                        let mut d = d0;
+                        let mut ok = 0;
+                        for i in 0..t.len() - p - 1 {
+                            let sn = (s + d) % md;
+                            if ((sn >> h) as i128 - t[p + i + 1] as i128).abs() <= 1 { ok += 1; } else { break; }
+                            s = sn; d = a * d % md;
+                        }
+                        if ok > 150 {
+                            println!("  CRACKED B={b} a={a} verified {ok} steps");
+                            cracked = true;
+                        }
+                    }
+                }
+            }
+            if !cracked { println!("  no known multiplier matched"); }
+        }
+        "jsdiff" => {
+            // Recover a truncated LCG with UNKNOWN multiplier & increment by
+            // brute-forcing the hidden bits of two consecutive state DIFFERENCES
+            // (the increment cancels: D_{i+1} = a*D_i mod 2^B). Tries both the
+            // single-step (w=54) and interleaved 27+27 (w=27) structures.
+            let p54 = 2f64.powi(54);
+            let nvals: Vec<u64> = v.iter().map(|&x| (x * p54).round() as u64).collect();
+            let modinv = |a: u128, md: u128| -> u128 {
+                let mut x = 1u128;
+                for _ in 0..8 { x = x.wrapping_mul(2u128.wrapping_sub(a.wrapping_mul(x))) % md; }
+                x % md
+            };
+            for &(w, label) in &[(54u32, "single"), (27u32, "27+27"), (27u32, "hi-only"), (27u32, "lo-only")] {
+                // Build observed top-w sequence T and exactness flags.
+                let (t, exact): (Vec<u128>, Vec<bool>) = if w == 54 {
+                    (nvals.iter().map(|&n| n as u128).collect(),
+                     v.iter().map(|&x| x < 0.5).collect())
+                } else if label == "hi-only" {
+                    (nvals.iter().map(|&n| (n >> 27) as u128).collect(),
+                     vec![true; nvals.len()])
+                } else if label == "lo-only" {
+                    (nvals.iter().map(|&n| (n & ((1 << 27) - 1)) as u128).collect(),
+                     v.iter().map(|&x| x < 0.5).collect())
+                } else {
+                    let mut t = Vec::new();
+                    let mut e = Vec::new();
+                    for (k, &n) in nvals.iter().enumerate() {
+                        t.push((n >> 27) as u128); e.push(true);          // hi: always exact
+                        t.push((n & ((1 << 27) - 1)) as u128); e.push(v[k] < 0.5); // lo
+                    }
+                    (t, e)
+                };
+                // anchor: 4 consecutive exact tops
+                let Some(p) = (0..t.len()-4).find(|&i| (0..4).all(|j| exact[i+j])) else { continue };
+                let mut cracked = false;
+                for b in (w + 1)..=(w + 12) {
+                    let h = b - w;
+                    let md = 1u128 << b;
+                    let span = 1i128 << h;
+                    let d0t = (t[p + 1] as i128 - t[p] as i128) as i128;
+                    let d1t = (t[p + 2] as i128 - t[p + 1] as i128) as i128;
+                    'br: for dd0 in -span + 1..span {
+                        let d0 = ((d0t * (1 << h) as i128 + dd0).rem_euclid(md as i128)) as u128;
+                        if d0 & 1 == 0 { continue; }
+                        let inv = modinv(d0, md);
+                        for dd1 in -span + 1..span {
+                            let d1 = ((d1t * (1 << h) as i128 + dd1).rem_euclid(md as i128)) as u128;
+                            let a = d1 * inv % md;
+                            // verify geometric D_i=a^i D0 reproduces top diffs (assume e_p≈0)
+                            let mut s = t[p] << h;
+                            let mut d = d0;
+                            let mut ok = 0;
+                            for i in 0..t.len() - p - 1 {
+                                let sn = (s + d) % md;
+                                let diff = (sn >> h) as i128 - (t[p + i + 1] as i128);
+                                if diff.abs() <= 1 { ok += 1; } else { break; }
+                                s = sn; d = a * d % md;
+                            }
+                            if ok > 150 {
+                                println!("  [{label}] B={b} multiplier a={a} verified {ok} steps");
+                                cracked = true;
+                                break 'br;
+                            }
+                        }
+                    }
+                    if cracked { break; }
+                }
+                if !cracked { println!("  [{label}] no multiplier found (h<=12)"); }
+            }
+        }
+        "lcg2" => {
+            // Second-order linear recurrence mod 2^B: N_{k+1} = A*N_k + B*N_{k-1} + C.
+            // N exact when value < 0.5; solve A,B from a run of 5 such, then C.
+            let b: u32 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(54);
+            let md: i128 = 1i128 << b;
+            let p = 2f64.powi(b as i32);
+            let n: Vec<i128> = v.iter().map(|&x| (x * p).round() as i128).collect();
+            let ex = |i: usize| v[i] < 0.5;
+            let modinv = |a: i128| -> Option<i128> {
+                let a = a.rem_euclid(md);
+                if a % 2 == 0 { return None; }
+                let mut x = 1i128;
+                for _ in 0..8 { let t=(2 - a*x % md).rem_euclid(md); x=(x*t).rem_euclid(md); }
+                Some(x)
+            };
+            // find 5 consecutive exact
+            let start = (0..n.len()-4).find(|&k| (0..5).all(|j| ex(k+j)));
+            let Some(k) = start else { println!("  no run of 5 exact values"); return; };
+            let (n0,n1,n2,n3,n4) = (n[k],n[k+1],n[k+2],n[k+3],n[k+4]);
+            // [ (n2-n1) (n1-n0) ][A]=[n3-n2]; [ (n3-n2) (n2-n1) ][B]=[n4-n3]
+            let (p00,p01,p10,p11)=((n2-n1).rem_euclid(md),(n1-n0).rem_euclid(md),(n3-n2).rem_euclid(md),(n2-n1).rem_euclid(md));
+            let det=(p00*p11 - p01*p10).rem_euclid(md);
+            let Some(idet)=modinv(det) else { println!("  det not invertible"); return; };
+            let r0=(n3-n2).rem_euclid(md); let r1=(n4-n3).rem_euclid(md);
+            let a=((p11*r0 - p01*r1).rem_euclid(md)*idet).rem_euclid(md);
+            let bb=((p00*r1 - p10*r0).rem_euclid(md)*idet).rem_euclid(md);
+            let c=(n2 - a*n1 % md - bb*n0 % md).rem_euclid(md);
+            println!("  A={a} B={bb} C={c}");
+            let mut ok=0; let mut tot=0;
+            for i in k+2..n.len() {
+                if ex(i) && ex(i-1) && ex(i-2) {
+                    tot+=1;
+                    if (a*n[i-1] + bb*n[i-2] + c).rem_euclid(md)==n[i] { ok+=1; }
+                }
+            }
+            println!("  2nd-order relation holds {ok}/{tot} exact triples");
+        }
         "lcgfull" => {
             // Test value = state/2^B with state a full LCG mod 2^B (no hidden
             // bits), single step per output. Also probes 2-steps-per-output.
