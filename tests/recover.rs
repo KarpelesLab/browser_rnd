@@ -9,7 +9,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use browser_rnd::engines::{spidermonkey, spidermonkey_legacy, v8, v8_legacy};
+use browser_rnd::engines::{jscript, spidermonkey, spidermonkey_legacy, v8, v8_legacy};
 use browser_rnd::prng::XorShift128Plus;
 use browser_rnd::sample::Sample;
 
@@ -69,6 +69,27 @@ fn modern_v8_xorshift128p() {
     }
     if tried == 0 {
         eprintln!("skip: no modern V8 fixtures");
+    }
+}
+
+#[test]
+fn internet_explorer_drand48_27_27() {
+    // JScript (IE6/7/8) and early Chakra (IE9/10/11) share one generator.
+    let mut tried = 0;
+    for rel in [
+        "ie/ie6-winxp.txt", "ie/ie7-winxp.txt", "ie/ie8-winxp.txt",
+        "ie/ie9-vista.txt", "ie10.txt", "ie11.txt",
+    ] {
+        let Some(v) = load(rel) else { continue };
+        tried += 1;
+        let seed = jscript::recover(&v).unwrap_or_else(|| panic!("{rel}: IE recover failed"));
+        assert!(
+            jscript::generate(seed, v.len()).iter().zip(&v).all(|(a, b)| (a - b).abs() < 1e-12),
+            "{rel}: reproduction mismatch"
+        );
+    }
+    if tried == 0 {
+        eprintln!("skip: no IE fixtures");
     }
 }
 

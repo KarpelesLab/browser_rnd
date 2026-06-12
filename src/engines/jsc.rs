@@ -1,43 +1,80 @@
-//! JavaScriptCore `Math.random()` — Safari and iOS WebViews.
+//! JavaScriptCore `Math.random()` — Safari / iOS WebViews.
 //!
-//! State transition: xorshift128+ (identical to V8). JSC's `WeakRandom` folds
-//! the post-step **sum** down using its **low** 53 bits (contrast SpiderMonkey,
-//! which uses the high 53):
+//! VERSION SPLIT:
+//!  - Safari ≤ 8 (2014) used **WeakRandom = "GameRand"** (Ian Bullard, 2009): a
+//!    tiny 64-bit-state PRNG (two 32-bit words), output `m_high / 2^32` → grid
+//!    2⁻³². This module implements that (the documented algorithm).
+//!  - Safari ≥ 9 switched WeakRandom to **xorshift128+** (like V8/SpiderMonkey),
+//!    with JSC's own double conversion — modelled in [`super::jsc_modern`] once a
+//!    capture is available to pin the extraction.
 //!
+//! GameRand (runtime/WeakRandom.h):
 //! ```text
-//! double = (s0 + s1) & (2^53 - 1)) as f64 * 2^-53
+//! advance(): m_high = rotl32(m_high,16) + m_low; m_low += m_high; return m_high
+//! get():     advance() / 2^32
+//! seed:      m_low = seed ^ 0x49616E42 ("IanB"); m_high = seed
 //! ```
-//!
-//! Values are served one-per-step in generation order.
-//!
-//! NOTE: confirm the low-vs-high choice against a real Safari capture before
-//! trusting recovery — that is exactly what the `samples/` fixtures are for.
+//! The output is the *full* 32-bit `m_high` (no truncation), so two consecutive
+//! outputs recover the hidden `m_low` in closed form — no search needed.
 
-use crate::prng::XorShift128Plus;
+const P32: f64 = 4_294_967_296.0; // 2^32
 
-const TWO_POW_53: f64 = 9_007_199_254_740_992.0; // 2^53
-const MASK_53: u64 = (1 << 53) - 1;
-
-/// Convert a post-step sum (`s0 + s1`) to the double JSC returns.
-#[inline]
-pub fn to_double(sum: u64) -> f64 {
-    ((sum & MASK_53) as f64) / TWO_POW_53
+/// GameRand state: the two 32-bit accumulators.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GameRand {
+    pub low: u32,
+    pub high: u32,
 }
 
-/// Recover the low 53 bits of the sum from an observed double.
-#[inline]
-pub fn sum_low_bits(value: f64) -> u64 {
-    (value * TWO_POW_53) as u64
+impl GameRand {
+    /// Seed exactly as JSC does (per JSGlobalObject).
+    pub fn seeded(seed: u32) -> Self {
+        GameRand { low: seed ^ 0x4961_6E42, high: seed }
+    }
+
+    /// Advance and return the 32-bit output (`m_high` after mixing).
+    #[inline]
+    pub fn advance(&mut self) -> u32 {
+        self.high = self.high.rotate_left(16).wrapping_add(self.low);
+        self.low = self.low.wrapping_add(self.high);
+        self.high
+    }
 }
 
-/// Generate `n` doubles in observed order, starting from `state`.
-pub fn generate(mut state: XorShift128Plus, n: usize) -> Vec<f64> {
+/// Generate `n` doubles starting from `state` (state before the first output).
+pub fn generate(mut state: GameRand, n: usize) -> Vec<f64> {
     let mut out = Vec::with_capacity(n);
     for _ in 0..n {
-        state.next_state();
-        out.push(to_double(state.sum()));
+        out.push(state.advance() as f64 / P32);
     }
     out
+}
+
+/// Recover the state from observed outputs. `out_k = m_high` after step k, and
+/// `m_high_k = rotl(m_high_{k-1},16) + m_low_{k-1}`, so `m_low` falls out of two
+/// consecutive outputs; we then step back one to get the pre-first-output state.
+/// Verified by full reproduction, so `Some` is conclusive.
+pub fn recover(values: &[f64]) -> Option<GameRand> {
+    if values.len() < 3 {
+        return None;
+    }
+    let h: Vec<u32> = values.iter().map(|&v| (v * P32).round() as u32).collect();
+    // state right after output 0: high = h[0], low = h[1] - rotl(h[0],16)
+    let low0 = h[1].wrapping_sub(h[0].rotate_left(16));
+    let high0 = h[0];
+    // step back one: pre.low = low0 - high0 ; pre.high = rotr(high0 - pre.low, 16)
+    let pre_low = low0.wrapping_sub(high0);
+    let pre_high = high0.wrapping_sub(pre_low).rotate_right(16);
+    let state = GameRand { low: pre_low, high: pre_high };
+    if generate(state, values.len())
+        .iter()
+        .zip(values)
+        .all(|(a, b)| (a - b).abs() < 1e-15)
+    {
+        Some(state)
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -45,17 +82,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn to_double_in_unit_interval() {
-        for bits in [0u64, u64::MAX, 0x1234_5678_9abc_def0] {
-            let d = to_double(bits);
-            assert!((0.0..1.0).contains(&d), "{d} out of range");
-        }
+    fn recover_round_trip() {
+        let v = generate(GameRand::seeded(0x12345678), 300);
+        let st = recover(&v).expect("recover");
+        assert!(generate(st, 300).iter().zip(&v).all(|(a, b)| (a - b).abs() < 1e-15));
     }
 
     #[test]
-    fn low_bits_round_trip() {
-        let sum = 0x0000_0000_0000_0FFFu64 | (0x1A << 53);
-        let d = to_double(sum);
-        assert_eq!(sum_low_bits(d), sum & MASK_53);
+    fn output_in_unit_interval() {
+        for d in generate(GameRand::seeded(1), 100) {
+            assert!((0.0..1.0).contains(&d));
+        }
     }
 }

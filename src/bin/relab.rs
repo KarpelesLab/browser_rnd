@@ -326,6 +326,46 @@ fn crack_jscript_z3(values: &[f64], b: u32) {
     println!("  B={b}: z3 SAT a={a} c={c} s0={} -> reproduced {ok} outputs", nums[2]);
 }
 
+/// Test whether an IE/Chakra capture is xorshift128+ with a `w`-bit extraction
+/// of (s0+s1) (low w bits). Free shifts (z3 finds them). value = N / 2^54.
+fn crack_ie_xs_z3(values: &[f64], w: u32) {
+    use std::process::Command;
+    let o: Vec<u64> = values.iter().map(|&x| (x * 2f64.powi(54)).round() as u64).collect();
+    let k = 6usize;
+    let mut smt = String::from("(set-logic QF_BV)\n");
+    for v in ["s0", "s1", "sa", "sb", "sc"] {
+        smt.push_str(&format!("(declare-const {v} (_ BitVec 64))\n"));
+    }
+    for v in ["sa", "sb", "sc"] {
+        smt.push_str(&format!("(assert (bvuge {v} (_ bv1 64)))(assert (bvule {v} (_ bv63 64)))\n"));
+    }
+    let (mut p0, mut p1) = ("s0".to_string(), "s1".to_string());
+    let hb = w - 1;
+    for i in 0..k {
+        let (t1, t2, f) = (format!("t1_{i}"), format!("t2_{i}"), format!("F_{i}"));
+        smt.push_str(&format!("(declare-const {t1} (_ BitVec 64))(assert (= {t1} (bvxor {p0} (bvshl {p0} sa))))\n"));
+        smt.push_str(&format!("(declare-const {t2} (_ BitVec 64))(assert (= {t2} (bvxor {t1} (bvlshr {t1} sb))))\n"));
+        smt.push_str(&format!("(declare-const {f} (_ BitVec 64))(assert (= {f} (bvxor (bvxor {t2} {p1}) (bvlshr {p1} sc))))\n"));
+        smt.push_str(&format!("(assert (= ((_ extract {hb} 0) (bvadd {p1} {f})) (_ bv{} {w})))\n", o[i]));
+        p0 = p1; p1 = f;
+    }
+    smt.push_str("(check-sat)\n(get-value (s0 s1 sa sb sc))\n");
+    std::fs::write("/tmp/ie.smt2", &smt).unwrap();
+    let out = match Command::new("z3").arg("-T:120").arg("/tmp/ie.smt2").output() {
+        Ok(o) => o, Err(e) => { println!("  z3 err {e}"); return; }
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    println!("  w={w}: {}", text.lines().next().unwrap_or("?"));
+    if text.contains("sat") && !text.starts_with("unsat") {
+        let h: Vec<u64> = text.split("#x").skip(1)
+            .filter_map(|s| u64::from_str_radix(&s.chars().take_while(|c| c.is_ascii_hexdigit()).collect::<String>(), 16).ok())
+            .collect();
+        let dec: Vec<u64> = text.split("(_ bv").skip(1)
+            .filter_map(|s| s.chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse().ok()).collect();
+        println!("    hexes={h:?} shift-decs(tail)={:?}", &dec[dec.len().saturating_sub(3)..]);
+    }
+}
+
 /// Modern SpiderMonkey via z3, parameterized by xorshift128+ shift constants
 /// (sa,sb,sc) and output mode. mode 0: (s0+s1)>>11 ; mode 1: s0>>11.
 /// Returns Some((s0,s1)) if z3 finds a state reproducing the first `k` outputs.
@@ -1048,6 +1088,39 @@ fn main() {
                 println!("  stride={stride} B={b}: M={m} A={a} -> {ok}/{} hold", n.len() - stride);
             }
         }
+        "chakra" => {
+            // ChakraCore (IE9-11): drand48 48-bit LCG, TWO steps per output,
+            // value = ((sn>>21)<<27 | (seed>>21)) / 2^54. Anchor on a value<0.5
+            // (exact), brute the 21 low bits of the first state, verify by value.
+            let p54 = 2f64.powi(54);
+            let n: Vec<u64> = v.iter().map(|&x| (x * p54).round() as u64).collect();
+            let a0 = (0..n.len()).find(|&i| v[i] < 0.5).unwrap();
+            let hi = n[a0] >> 27;
+            let lo = n[a0] & ((1 << 27) - 1);
+            let mut done = false;
+            for x in 0..(1u64 << 21) {
+                let s1 = (hi << 21) | x;
+                let s2 = d_step(s1);
+                if s2 >> 21 != lo { continue; }
+                // verify forward from a0 by value (tolerant of f64 bit0 rounding)
+                let mut st = s1;
+                let mut ok = 0usize;
+                for &want in &v[a0..] {
+                    let h = st >> 21;
+                    let s_b = d_step(st);
+                    let l = s_b >> 21;
+                    let val = ((h << 27) + l) as f64 / p54;
+                    if (val - want).abs() < 3.0 / p54 { ok += 1; } else { break; }
+                    st = d_step(s_b);
+                }
+                if ok > 100 {
+                    println!("  CHAKRA drand48 27+27: s1={s1:#x} reproduced {ok}/{} from idx {a0}", v.len() - a0);
+                    done = true;
+                    break;
+                }
+            }
+            if !done { println!("  no chakra/drand48 match"); }
+        }
         "jscript48" => {
             // Hypothesis: value = (next(27)<<27 | next(27)) / 2^54 from a 48-bit
             // LCG with drand48 constants; next(27) = state >> 21.
@@ -1168,6 +1241,10 @@ fn main() {
         "v8xs" => crack_v8_xs(v),
         "sm" => crack_sm(v),
         "smz3" => crack_sm_z3(v),
+        "iez3" => {
+            let w: u32 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(54);
+            crack_ie_xs_z3(v, w);
+        }
         "smz3test" => {
             // self-test: synthetic SM data from a known seed
             let syn = browser_rnd::engines::spidermonkey::generate(
