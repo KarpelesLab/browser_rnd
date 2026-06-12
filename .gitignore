@@ -1,0 +1,10 @@
+/target
+**/*.rs.bk
+# editor cruft
+*.swp
+*.swo
+*~
+.*.swp
+Cargo.lock
+# NOTE: samples/ is intentionally committed — captured browser outputs are our
+# regression fixtures. Do not ignore them.
