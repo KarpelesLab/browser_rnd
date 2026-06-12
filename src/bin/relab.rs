@@ -1088,6 +1088,54 @@ fn main() {
                 println!("  stride={stride} B={b}: M={m} A={a} -> {ok}/{} hold", n.len() - stride);
             }
         }
+        "msvcrt" => {
+            // Chrome 1 (Windows): two MSVCRT rand() calls per Math.random.
+            // rand(): s = s*214013 + 2531011 (mod 2^32); out = (s>>16) & 0x7FFF.
+            // value = (r1<<15 | r2) / 2^30.
+            let p30 = 2f64.powi(30);
+            let n: Vec<u64> = v.iter().map(|&x| (x * p30).round() as u64).collect();
+            let m = 1u64 << 32;
+            let mut done = false;
+            'consts: for &(a, c, name) in &[
+                (214013u64, 2531011u64, "msvcrt"),
+                (1103515245u64, 12345u64, "ansi-c"),
+                (1103515245u64, 12345u64, "ansi-c"),
+            ] {
+                let lcg = |s: u64| (s.wrapping_mul(a).wrapping_add(c)) & (m - 1);
+                for &(sh, mask, lbl) in &[(16u32, 0x7FFFu64, "hi15"), (16, 0xFFFF, "hi16"), (0, 0x7FFF, "lo15")] {
+                    let ext = |s: u64| (s >> sh) & mask;
+                    let bits = (mask + 1).trailing_zeros();
+                    let r1 = n[0] >> bits;
+                    let r2 = n[0] & mask;
+                    let hidden = 32 - bits; // bits not pinned by r1
+                    if hidden > 20 { continue; }
+                    let _ = lbl;
+                    for x in 0..(1u64 << hidden) {
+                        // r1 occupies bits [sh, sh+bits); brute the other `hidden` bits:
+                        // x's low `sh` bits -> state bits [0,sh); x's rest -> bits [sh+bits,32)
+                        let xlow = x & ((1u64 << sh).wrapping_sub(1));
+                        let xhigh = x >> sh;
+                        let s1 = ((xhigh << (sh + bits)) | (r1 << sh) | xlow) & (m - 1);
+                        let s2 = lcg(s1);
+                        if ext(s2) != r2 { continue; }
+                        let mut st = s2;
+                        let mut ok = 0usize;
+                        for &want in &n[1..] {
+                            let a1 = lcg(st);
+                            let a2 = lcg(a1);
+                            let np = (ext(a1) << bits) | ext(a2);
+                            if np == want { ok += 1; st = a2; } else { break; }
+                        }
+                        if ok > 100 {
+                            println!("  {name}/{lbl} rand x2: s1={s1:#x} reproduced {ok}/{}", n.len() - 1);
+                            done = true;
+                            break 'consts;
+                        }
+                    }
+                }
+            }
+            if !done { println!("  no LCG-rand x2 match"); }
+        }
         "chakra" => {
             // ChakraCore (IE9-11): drand48 48-bit LCG, TWO steps per output,
             // value = ((sn>>21)<<27 | (seed>>21)) / 2^54. Anchor on a value<0.5

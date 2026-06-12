@@ -58,7 +58,7 @@ double-conversion denominator — the first thing the fingerprint pins down.
 | **IE (JScript + Chakra)** | **IE 6/7/8/9/10/11** | **2⁻⁵⁴** | **drand48 48-bit LCG, 27+27 → 2⁵⁴** | **2²¹ brute** | ✅ cracked |
 | JSC (Safari ≤8) | *(no sample yet)* | 2⁻³² | GameRand (Ian Bullard), 2×u32 | closed-form | 🧩 modelled |
 | Presto | Opera 10 | 2⁻⁵³ | **SNOW 2.0 CSPRNG** + entropy reseeding | **infeasible by design** | 🔒 unpredictable |
-| oldest V8 | Chrome 1 (2008) | 2⁻³⁰ | 30-bit MWC variant | TBD | 🔬 open |
+| oldest V8 | Chrome 1 (2008) | 2⁻³⁰ | host libc `random()` × 2 (no custom PRNG) | platform-specific | 🔬 open |
 
 Notable findings:
 - **IE 6–11 all share one generator**: drand48 (`0x5DEECE66D`,+11), two steps/call,
@@ -67,8 +67,11 @@ Notable findings:
   anchors on a value < 0.5.)
 - **Modern Firefox uses the LOW 53 bits** of `s0+s1`, not `>>11`. The addition is
   nonlinear over GF(2), so recovery uses the z3 SMT solver.
-- **V8 has 4 eras**: MWC era1 (`<<14`), era2 (`<<16`), era3 (18030), then xorshift128+
-  (Chrome 49+, 52-bit, reversed cache of 64; recovery searches the batch offset, ~4–5).
+- **V8 has 4 eras** (+ a pre-history): Chrome 1 (V8 ≤1.1) just combined two host
+  `libc random()` calls — no custom PRNG, so it's platform-dependent (the obvious
+  MSVCRT/ANSI-C LCGs don't fit; likely glibc's 31-word additive-feedback `random()`).
+  Then MWC era1 (`<<14`), era2 (`<<16`), era3 (18030), then xorshift128+ (Chrome 49+,
+  52-bit, reversed cache of 64; recovery searches the batch offset, ~4–5).
 - **Presto (Opera) is the lone holdout** — it deliberately uses a SNOW 2.0
   CSPRNG continuously reseeded with entropy, so its `Math.random()` is genuinely
   unpredictable (no fixed state to recover). Every other engine here is breakable.
