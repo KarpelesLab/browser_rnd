@@ -1357,6 +1357,63 @@ fn main() {
         }
         "drand48" => crack_drand48(v),
         "v8xs" => crack_v8_xs(v),
+        "v8scan" => {
+            // In-order, free shifts; scan output extraction modes. value*2^52 grid.
+            use std::process::Command;
+            let m52: Vec<u64> = v.iter().map(|&x| ((x + 1.0).to_bits()) & 0x000F_FFFF_FFFF_FFFF).collect();
+            // exprs: new_s0=p1, new_s1=F, sum=(bvadd p1 F)
+            let modes: [(&str, &str, &str); 6] = [
+                ("s0>>12", "{P1}", "63 12"), ("s1>>12", "{F}", "63 12"), ("sum>>12", "(bvadd {P1} {F})", "63 12"),
+                ("s0&m52", "{P1}", "51 0"), ("s1&m52", "{F}", "51 0"), ("sum&m52", "(bvadd {P1} {F})", "51 0"),
+            ];
+            for (name, expr, bits) in modes {
+                let mut smt = String::from("(set-logic QF_BV)\n");
+                for d in ["s0","s1","sa","sb","sc"] { smt.push_str(&format!("(declare-const {d} (_ BitVec 64))\n")); }
+                for d in ["sa","sb","sc"] { smt.push_str(&format!("(assert (bvuge {d} (_ bv1 64)))(assert (bvule {d} (_ bv63 64)))\n")); }
+                let (mut p0, mut p1s) = ("s0".to_string(), "s1".to_string());
+                for i in 0..7 {
+                    let (t1,t2,f)=(format!("t1_{i}"),format!("t2_{i}"),format!("F_{i}"));
+                    smt.push_str(&format!("(declare-const {t1} (_ BitVec 64))(assert (= {t1} (bvxor {p0} (bvshl {p0} sa))))\n"));
+                    smt.push_str(&format!("(declare-const {t2} (_ BitVec 64))(assert (= {t2} (bvxor {t1} (bvlshr {t1} sb))))\n"));
+                    smt.push_str(&format!("(declare-const {f} (_ BitVec 64))(assert (= {f} (bvxor (bvxor {t2} {p1s}) (bvlshr {p1s} sc))))\n"));
+                    let e = expr.replace("{P1}", &p1s).replace("{F}", &f);
+                    let width = if bits == "63 12" { 52 } else { 52 };
+                    smt.push_str(&format!("(assert (= ((_ extract {bits}) {e}) (_ bv{} {width})))\n", m52[i]));
+                    p0 = p1s; p1s = f;
+                }
+                smt.push_str("(check-sat)\n");
+                std::fs::write("/tmp/scan.smt2", &smt).unwrap();
+                let out = Command::new("z3").arg("-T:90").arg("/tmp/scan.smt2").output().unwrap();
+                let res = String::from_utf8_lossy(&out.stdout);
+                println!("  mode {name:10}: {}", res.lines().next().unwrap_or("?"));
+            }
+        }
+        "v8z3sumtop" => {
+            // in-order, output = (s0+s1) >> 12 (TOP 52 of the sum), free shifts.
+            use std::process::Command;
+            let m: Vec<u64> = v.iter().map(|&x| ((x + 1.0).to_bits()) & 0x000F_FFFF_FFFF_FFFF).collect();
+            let mut smt = String::from("(set-logic QF_BV)\n");
+            for d in ["s0","s1","sa","sb","sc"] { smt.push_str(&format!("(declare-const {d} (_ BitVec 64))\n")); }
+            for d in ["sa","sb","sc"] { smt.push_str(&format!("(assert (bvuge {d} (_ bv1 64)))(assert (bvule {d} (_ bv63 64)))\n")); }
+            let (mut p0, mut p1) = ("s0".to_string(), "s1".to_string());
+            for i in 0..8 {
+                let (t1,t2,f)=(format!("t1_{i}"),format!("t2_{i}"),format!("F_{i}"));
+                smt.push_str(&format!("(declare-const {t1} (_ BitVec 64))(assert (= {t1} (bvxor {p0} (bvshl {p0} sa))))\n"));
+                smt.push_str(&format!("(declare-const {t2} (_ BitVec 64))(assert (= {t2} (bvxor {t1} (bvlshr {t1} sb))))\n"));
+                smt.push_str(&format!("(declare-const {f} (_ BitVec 64))(assert (= {f} (bvxor (bvxor {t2} {p1}) (bvlshr {p1} sc))))\n"));
+                smt.push_str(&format!("(assert (= ((_ extract 63 12) (bvadd {p1} {f})) (_ bv{} 52)))\n", m[i]));
+                p0 = p1; p1 = f;
+            }
+            smt.push_str("(check-sat)\n(get-value (s0 s1 sa sb sc))\n");
+            std::fs::write("/tmp/v8st.smt2", &smt).unwrap();
+            let out = Command::new("z3").arg("-T:300").arg("/tmp/v8st.smt2").output().unwrap();
+            let text = String::from_utf8_lossy(&out.stdout);
+            println!("  {}", text.lines().next().unwrap_or("?"));
+            if text.contains("sat") && !text.starts_with("unsat") {
+                let dec: Vec<u64> = text.split("(_ bv").skip(1).filter_map(|s| s.chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse().ok()).collect();
+                println!("    shifts(tail)={:?}", &dec[dec.len().saturating_sub(3)..]);
+            }
+        }
         "v8z3" => {
             // Early V8 via z3, free shifts, output = s0>>12 (52-bit) served IN ORDER.
             use std::process::Command;

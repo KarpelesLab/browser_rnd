@@ -101,7 +101,8 @@ Chrome:  v1  libc rand()x2 (2⁻³⁰)
          v33–38 MWC <<16, hi=18273       (era 2)
          v40–46 MWC <<16, hi=18030       (era 3, the "Marsaglia-3D" fix)
          v48     MWC 18030 + %_ConstructDouble conv  (4.9 "Stage A")  ✅ z3
-         v49–~55 xorshift128+ in-order, (s0+s1)&mask52 (4.9 "Stage B")  ✅ z3
+         v49–50  xorshift128+ in-order, (s0+s1)&mask52 (4.9 "Stage B") ✅ z3
+         v52–53  xorshift128+, V8 5.1–5.3 variant     (🔬 open)
          v77+    xorshift128+ reversed cache, s0>>12   (stable)        ✅ GF(2)
 Firefox: v1–26 drand48 → v50+ xorshift128+ (switch at FF48, late 2015)
 Opera:   v10–11.60 Presto/SNOW2 → v16–22 MWC → v40+ xorshift128+
@@ -114,8 +115,15 @@ refactor — same MWC, but the double is mantissa-stuffed via `%_ConstructDouble
 real rewrite: xorshift128+ served **in order** with `ToDouble = (s0+s1)&mantissaMask`
 (low 52 bits of the *sum* — nonlinear, so z3). Only **later** (by Chrome 77) did V8
 switch the conversion to `s0>>12` *and* add the reversed 64-cache — the stable form
-that recovers with plain GF(2). (`opera40`/Chromium 53 is the lone straggler — likely
-Stage B already behind the reversed cache; one capture, still open.)
+that recovers with plain GF(2).
+
+There's a **third, still-open xorshift variant** in between: V8 5.1–5.3 (Chrome 52–53,
+Opera 38–40, ~mid-2016). A *clean Chrome* capture (chrome53) and a recaptured opera40
+both fail identically — so it's a genuine algorithm variant, not a capture artifact.
+It fits **none** of: in-order × {s0,s1,sum} × {top-52, low-52} (free shift), nor
+reversed-cache + `s0>>12` (scanned shifts), nor reversed-cache + `(s0+s1)&mask52`.
+It's almost certainly the reversed cache paired with a conversion/shift combo the
+black-box search can't reach; closing it needs the V8 5.1–5.3 source.
 
 ## Infra status
 
