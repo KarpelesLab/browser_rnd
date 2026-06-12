@@ -1462,6 +1462,62 @@ fn main() {
             }
             println!("  STAGE-A MWC 18030/36969 + ConstructDouble: s0={:#x} s1={:#x} reproduced {ok}/{}", h[0], h[1], v.len());
         }
+        "v8revsum" => {
+            // Hypothesis: reversed cache of 64 + Stage-B conversion (s0+s1)&mask52.
+            // For batch offset o, observed[0..63-o] reversed == gen[0..63-o] (in order),
+            // so de-reverse that window and run the in-order Stage-B z3 solve, then
+            // verify with a reversed-cache sum-low52 generator.
+            use std::process::Command;
+            let p52 = 4_503_599_627_370_496.0f64;
+            let solve = |win: &[f64]| -> Option<(u64, u64)> {
+                let o: Vec<u64> = win.iter().map(|&x| (x * p52).round() as u64).collect();
+                let mut smt = String::from("(set-logic QF_BV)\n(declare-const s0 (_ BitVec 64))\n(declare-const s1 (_ BitVec 64))\n");
+                let (mut p0, mut p1) = ("s0".to_string(), "s1".to_string());
+                for i in 0..8 {
+                    let (t1, t2, f) = (format!("t1_{i}"), format!("t2_{i}"), format!("F_{i}"));
+                    smt.push_str(&format!("(declare-const {t1} (_ BitVec 64))(assert (= {t1} (bvxor {p0} (bvshl {p0} (_ bv23 64)))))\n"));
+                    smt.push_str(&format!("(declare-const {t2} (_ BitVec 64))(assert (= {t2} (bvxor {t1} (bvlshr {t1} (_ bv17 64)))))\n"));
+                    smt.push_str(&format!("(declare-const {f} (_ BitVec 64))(assert (= {f} (bvxor (bvxor {t2} {p1}) (bvlshr {p1} (_ bv26 64)))))\n"));
+                    smt.push_str(&format!("(assert (= ((_ extract 51 0) (bvadd {p1} {f})) (_ bv{} 52)))\n", o[i]));
+                    p0 = p1; p1 = f;
+                }
+                smt.push_str("(check-sat)\n(get-value (s0 s1))\n");
+                std::fs::write("/tmp/rev.smt2", &smt).ok()?;
+                let out = Command::new("z3").arg("-T:30").arg("/tmp/rev.smt2").output().ok()?;
+                let text = String::from_utf8_lossy(&out.stdout);
+                if !text.contains("sat") || text.starts_with("unsat") { return None; }
+                let h: Vec<u64> = text.split("#x").skip(1)
+                    .filter_map(|s| u64::from_str_radix(&s.chars().take_while(|c| c.is_ascii_hexdigit()).collect::<String>(),16).ok()).collect();
+                if h.len() < 2 { None } else { Some((h[0], h[1])) }
+            };
+            // reversed-cache sum-low52 generator: fill 64 (gen0..63), serve reversed
+            let gen_rev = |s0: u64, s1: u64, n: usize| -> Vec<f64> {
+                let mut st = browser_rnd::prng::XorShift128Plus::new(s0, s1);
+                let mut out = Vec::new();
+                while out.len() < n {
+                    let mut batch = Vec::with_capacity(64);
+                    for _ in 0..64 { st.next_state(); batch.push((st.sum() & 0x000F_FFFF_FFFF_FFFF) as f64 / p52); }
+                    for d in batch.into_iter().rev() { if out.len() < n { out.push(d); } }
+                }
+                out
+            };
+            let mut done = false;
+            for o in 0..56usize {
+                let take = 64 - o;
+                if take < 8 { break; }
+                let mut win: Vec<f64> = v[..take].to_vec();
+                win.reverse();
+                if let Some((s0, s1)) = solve(&win[..8.max(0)]) {
+                    let regen = gen_rev(s0, s1, o + v.len());
+                    let ok = regen[o..].iter().zip(v).take_while(|(a, b)| (**a - **b).abs() < 1e-15).count();
+                    if ok > 100 {
+                        println!("  REVERSED-CACHE + sum-low52: offset={o} s0={s0:#018x} s1={s1:#018x} reproduced {ok}/{}", v.len());
+                        done = true; break;
+                    }
+                }
+            }
+            if !done { println!("  reversed-cache+sum-low52 did not fit"); }
+        }
         "v8stageb" => {
             // Early-4.9 xorshift128+ (Stage B): in-order, ToDouble = (s0+s1) & (2^52-1).
             use std::process::Command;
