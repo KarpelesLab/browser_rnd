@@ -1417,6 +1417,73 @@ fn main() {
             }
             if !hit { println!("  no reversed-cache shift variant fit"); }
         }
+        "v8stagea" => {
+            // Early-4.9 MWC (Stage A): lanes 18030/36969, value mantissa =
+            // (r0 & 0xFFFFF)<<32 | (r1 & 0xFFF00000), where r0,r1 are the stepped
+            // 32-bit lane states. z3 solves the two 32-bit lane states.
+            use std::process::Command;
+            let k = 10usize;
+            let m: Vec<u64> = v.iter().map(|&x| (x * 4_503_599_627_370_496.0).round() as u64).collect();
+            let mut smt = String::from("(set-logic QF_BV)\n(declare-const s0 (_ BitVec 32))\n(declare-const s1 (_ BitVec 32))\n");
+            let (mut p0, mut p1) = ("s0".to_string(), "s1".to_string());
+            for i in 0..k {
+                let (r0, r1) = (format!("r0_{i}"), format!("r1_{i}"));
+                smt.push_str(&format!("(declare-const {r0} (_ BitVec 32))(assert (= {r0} (bvadd (bvmul (_ bv18030 32) (bvand {p0} (_ bv65535 32))) (bvlshr {p0} (_ bv16 32)))))\n"));
+                smt.push_str(&format!("(declare-const {r1} (_ BitVec 32))(assert (= {r1} (bvadd (bvmul (_ bv36969 32) (bvand {p1} (_ bv65535 32))) (bvlshr {p1} (_ bv16 32)))))\n"));
+                // mantissa (52-bit) = ((r0 & 0xFFFFF) << 32) | (r1 & 0xFFF00000)
+                smt.push_str(&format!("(assert (= (bvor (bvshl ((_ zero_extend 20) (bvand {r0} (_ bv1048575 32))) (_ bv32 52)) ((_ zero_extend 20) (bvand {r1} (_ bv4293918720 32)))) (_ bv{} 52)))\n", m[i]));
+                p0 = r0; p1 = r1;
+            }
+            smt.push_str("(check-sat)\n(get-value (s0 s1))\n");
+            std::fs::write("/tmp/v8a.smt2", &smt).unwrap();
+            let out = Command::new("z3").arg("-T:120").arg("/tmp/v8a.smt2").output().unwrap();
+            let text = String::from_utf8_lossy(&out.stdout);
+            if !text.contains("sat") || text.starts_with("unsat") { println!("  {}", text.lines().next().unwrap_or("?")); return; }
+            let h: Vec<u64> = text.split("#x").skip(1)
+                .filter_map(|s| u64::from_str_radix(&s.chars().take_while(|c| c.is_ascii_hexdigit()).collect::<String>(),16).ok()).collect();
+            // verify forward
+            let (mut s0, mut s1) = (h[0] as u32, h[1] as u32);
+            let step = |s: u32, mu: u64| ((mu * ((s as u64)&0xFFFF) + ((s as u64)>>16)) & 0xFFFFFFFF) as u32;
+            let mut ok = 0usize;
+            for &want in &m {
+                s0 = step(s0, 18030); s1 = step(s1, 36969);
+                let mant = (((s0 as u64) & 0xFFFFF) << 32) | ((s1 as u64) & 0xFFF00000);
+                if mant == want { ok += 1; } else { break; }
+            }
+            println!("  STAGE-A MWC 18030/36969 + ConstructDouble: s0={:#x} s1={:#x} reproduced {ok}/{}", h[0], h[1], v.len());
+        }
+        "v8stageb" => {
+            // Early-4.9 xorshift128+ (Stage B): in-order, ToDouble = (s0+s1) & (2^52-1).
+            use std::process::Command;
+            let k = 8usize;
+            let o: Vec<u64> = v.iter().map(|&x| (x * 4_503_599_627_370_496.0).round() as u64).collect(); // *2^52
+            let mut smt = String::from("(set-logic QF_BV)\n(declare-const s0 (_ BitVec 64))\n(declare-const s1 (_ BitVec 64))\n");
+            let (mut p0, mut p1) = ("s0".to_string(), "s1".to_string());
+            for i in 0..k {
+                let (t1, t2, f) = (format!("t1_{i}"), format!("t2_{i}"), format!("F_{i}"));
+                smt.push_str(&format!("(declare-const {t1} (_ BitVec 64))(assert (= {t1} (bvxor {p0} (bvshl {p0} (_ bv23 64)))))\n"));
+                smt.push_str(&format!("(declare-const {t2} (_ BitVec 64))(assert (= {t2} (bvxor {t1} (bvlshr {t1} (_ bv17 64)))))\n"));
+                smt.push_str(&format!("(declare-const {f} (_ BitVec 64))(assert (= {f} (bvxor (bvxor {t2} {p1}) (bvlshr {p1} (_ bv26 64)))))\n"));
+                smt.push_str(&format!("(assert (= ((_ extract 51 0) (bvadd {p1} {f})) (_ bv{} 52)))\n", o[i]));
+                p0 = p1; p1 = f;
+            }
+            smt.push_str("(check-sat)\n(get-value (s0 s1))\n");
+            std::fs::write("/tmp/v8b.smt2", &smt).unwrap();
+            let out = Command::new("z3").arg("-T:120").arg("/tmp/v8b.smt2").output().unwrap();
+            let text = String::from_utf8_lossy(&out.stdout);
+            if !text.contains("sat") || text.starts_with("unsat") { println!("  {}", text.lines().next().unwrap_or("?")); return; }
+            let h: Vec<u64> = text.split("#x").skip(1)
+                .filter_map(|s| u64::from_str_radix(&s.chars().take_while(|c| c.is_ascii_hexdigit()).collect::<String>(),16).ok()).collect();
+            // verify forward with Stage B model
+            let mut st = browser_rnd::prng::XorShift128Plus::new(h[0], h[1]);
+            let mut ok = 0usize;
+            for &want in v {
+                st.next_state();
+                let val = ((st.sum() & 0x000F_FFFF_FFFF_FFFF) as f64) / 4_503_599_627_370_496.0;
+                if val == want { ok += 1; } else { break; }
+            }
+            println!("  STAGE-B xorshift128+ in-order, (s0+s1)&mask52: s0={:#018x} s1={:#018x} reproduced {ok}/{}", h[0], h[1], v.len());
+        }
         "v8inorder" => {
             // Early V8 xorshift128+ hypothesis: s0>>12 served IN ORDER (no reversed
             // cache). observed[j] = s0 after (offset+j+1) steps. GF(2) solve.

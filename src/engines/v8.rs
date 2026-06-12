@@ -158,9 +158,83 @@ pub fn recover(values: &[f64]) -> Option<(XorShift128Plus, usize)> {
     None
 }
 
+// --- early xorshift128+ (V8 4.9 "Stage B", Chrome ~49–55) -------------------
+// Before the stable form above, V8's first xorshift128+ release used a DIFFERENT
+// double conversion and serving order: `ToDouble = ((s0+s1) & mantissaMask) | exp`
+// (low 52 bits of the *sum*, not `s0>>12`), served IN ORDER (cache slots 2..63
+// ascending; state persisted in slots 0–1 — observationally a contiguous stream).
+// The sum is nonlinear over GF(2), so recovery uses z3 (like SpiderMonkey).
+
+const MANTISSA52: u64 = 0x000F_FFFF_FFFF_FFFF;
+const P52: f64 = 4_503_599_627_370_496.0; // 2^52
+
+/// Generate `n` doubles in the early-4.9 (Stage B) form: in-order, low 52 bits
+/// of `s0+s1`.
+pub fn generate_early(mut state: XorShift128Plus, n: usize) -> Vec<f64> {
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        state.next_state();
+        out.push((state.sum() & MANTISSA52) as f64 / P52);
+    }
+    out
+}
+
+/// Recover the early-4.9 (Stage B) state via z3. Returns `None` if z3 is missing
+/// or the data isn't this variant. Verified by full reproduction.
+pub fn recover_early(values: &[f64]) -> Option<XorShift128Plus> {
+    use std::process::Command;
+    if values.len() < 8 {
+        return None;
+    }
+    let o: Vec<u64> = values.iter().map(|&x| (x * P52).round() as u64).collect();
+    let mut smt = String::from(
+        "(set-logic QF_BV)\n(declare-const s0 (_ BitVec 64))\n(declare-const s1 (_ BitVec 64))\n",
+    );
+    let (mut p0, mut p1) = ("s0".to_string(), "s1".to_string());
+    for (i, &oi) in o.iter().take(8).enumerate() {
+        let (t1, t2, f) = (format!("t1_{i}"), format!("t2_{i}"), format!("F_{i}"));
+        smt.push_str(&format!("(declare-const {t1} (_ BitVec 64))(assert (= {t1} (bvxor {p0} (bvshl {p0} (_ bv23 64)))))\n"));
+        smt.push_str(&format!("(declare-const {t2} (_ BitVec 64))(assert (= {t2} (bvxor {t1} (bvlshr {t1} (_ bv17 64)))))\n"));
+        smt.push_str(&format!("(declare-const {f} (_ BitVec 64))(assert (= {f} (bvxor (bvxor {t2} {p1}) (bvlshr {p1} (_ bv26 64)))))\n"));
+        smt.push_str(&format!("(assert (= ((_ extract 51 0) (bvadd {p1} {f})) (_ bv{oi} 52)))\n"));
+        p0 = p1;
+        p1 = f;
+    }
+    smt.push_str("(check-sat)\n(get-value (s0 s1))\n");
+    let path = std::env::temp_dir().join(format!("v8b_{}.smt2", std::process::id()));
+    std::fs::write(&path, &smt).ok()?;
+    let out = Command::new("z3").arg("-T:120").arg(&path).output().ok()?;
+    let _ = std::fs::remove_file(&path);
+    let text = String::from_utf8_lossy(&out.stdout);
+    if !text.contains("sat") || text.starts_with("unsat") {
+        return None;
+    }
+    let h: Vec<u64> = text.split("#x").skip(1)
+        .filter_map(|s| u64::from_str_radix(&s.chars().take_while(|c| c.is_ascii_hexdigit()).collect::<String>(), 16).ok())
+        .collect();
+    if h.len() < 2 {
+        return None;
+    }
+    let state = XorShift128Plus::new(h[0], h[1]);
+    if generate_early(state, values.len()).iter().zip(values).all(|(a, b)| (a - b).abs() < 1e-15) {
+        Some(state)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn early_round_trip() {
+        let seed = XorShift128Plus::new(0xabcd_1234_5678_9012, 0x1111_2222_3333_4444);
+        let v = generate_early(seed, 100);
+        // forward model self-consistency (recover needs z3; covered in tests/recover.rs)
+        assert!(v.iter().all(|d| (0.0..1.0).contains(d)));
+        assert_eq!(generate_early(seed, 100), v);
+    }
 
     #[test]
     fn recover_round_trip() {

@@ -100,17 +100,22 @@ Chrome:  v1  libc rand()x2 (2⁻³⁰)
          v20–32 MWC <<14, hi=18273       (era 1)
          v33–38 MWC <<16, hi=18273       (era 2)
          v40–46 MWC <<16, hi=18030       (era 3, the "Marsaglia-3D" fix)
-         v48 ── transitional ──          (still 2⁻³² but no longer MWC)
-         v49–~55 early xorshift128+ (2⁻⁵²) — churny, not yet the stable cache
-         v77+ modern xorshift128+ (reversed cache of 64)  ✅ recoverable
+         v48     MWC 18030 + %_ConstructDouble conv  (4.9 "Stage A")  ✅ z3
+         v49–~55 xorshift128+ in-order, (s0+s1)&mask52 (4.9 "Stage B")  ✅ z3
+         v77+    xorshift128+ reversed cache, s0>>12   (stable)        ✅ GF(2)
 Firefox: v1–26 drand48 → v50+ xorshift128+ (switch at FF48, late 2015)
 Opera:   v10–11.60 Presto/SNOW2 → v16–22 MWC → v40+ xorshift128+
 ```
 
-The **early-xorshift window (Chrome ~48–55, Opera 40, Vivaldi 1.0)** is a distinct
-transitional variant: 2⁻⁵² (so still `s0>>12`) but it fits neither the reversed-
-cache-of-64 model (any shifts) nor a plain in-order stream. Cracking it precisely
-needs the V8 4.9–4.x source (the implementation churned before stabilising by v77).
+The V8 **4.9 transitional band is fully cracked**, and it turned out to be *two*
+changes back-to-back (per the source): **Stage A** (Chrome 48) was a conversion-only
+refactor — same MWC, but the double is mantissa-stuffed via `%_ConstructDouble`
+(`(r0&0xFFFFF)<<32 | (r1&0xFFF00000)`, grid 2⁻³²). **Stage B** (Chrome 49–~55) is the
+real rewrite: xorshift128+ served **in order** with `ToDouble = (s0+s1)&mantissaMask`
+(low 52 bits of the *sum* — nonlinear, so z3). Only **later** (by Chrome 77) did V8
+switch the conversion to `s0>>12` *and* add the reversed 64-cache — the stable form
+that recovers with plain GF(2). (`opera40`/Chromium 53 is the lone straggler — likely
+Stage B already behind the reversed cache; one capture, still open.)
 
 ## Infra status
 

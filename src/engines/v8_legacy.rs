@@ -138,9 +138,79 @@ fn recover_shift14(r: &[u64], m0: u64, m1: u64) -> Option<Mwc> {
     Some(Mwc { s0, s1, mult0: m0, mult1: m1, combine: Combine::Shift14 })
 }
 
+// --- V8 4.9 "Stage A": MWC with the %_ConstructDouble conversion ------------
+// A conversion-only refactor that shipped just before xorshift128+ (Chrome 48).
+// Same MWC lanes (18030/36969) but the double is assembled by stuffing bits into
+// the mantissa: `mantissa = (r0 & 0xFFFFF)<<32 | (r1 & 0xFFF00000)`, /2^52 — so
+// still only 32 random bits, grid 2^-32, but a different bit layout than the
+// `r/2^32` reciprocal-multiply forms above (which is why it doesn't recover as a
+// plain MWC). lane1's low bits are hidden by the conversion, so recovery uses z3.
+
+const STAGE_A_M0: u64 = 18030;
+const STAGE_A_M1: u64 = 36969;
+
+/// Generate Stage-A doubles from the two 32-bit lane states.
+pub fn generate_stage_a(mut s0: u32, mut s1: u32, n: usize) -> Vec<f64> {
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        s0 = step(s0, STAGE_A_M0);
+        s1 = step(s1, STAGE_A_M1);
+        let mant = (((s0 as u64) & 0xFFFFF) << 32) | ((s1 as u64) & 0xFFF0_0000);
+        out.push(mant as f64 / 4_503_599_627_370_496.0); // /2^52
+    }
+    out
+}
+
+/// Recover the two Stage-A lane states via z3. Verified by full reproduction.
+pub fn recover_stage_a(values: &[f64]) -> Option<(u32, u32)> {
+    use std::process::Command;
+    if values.len() < 10 {
+        return None;
+    }
+    let m: Vec<u64> = values.iter().map(|&x| (x * 4_503_599_627_370_496.0).round() as u64).collect();
+    let mut smt = String::from("(set-logic QF_BV)\n(declare-const s0 (_ BitVec 32))\n(declare-const s1 (_ BitVec 32))\n");
+    let (mut p0, mut p1) = ("s0".to_string(), "s1".to_string());
+    for (i, &mi) in m.iter().take(10).enumerate() {
+        let (r0, r1) = (format!("r0_{i}"), format!("r1_{i}"));
+        smt.push_str(&format!("(declare-const {r0} (_ BitVec 32))(assert (= {r0} (bvadd (bvmul (_ bv18030 32) (bvand {p0} (_ bv65535 32))) (bvlshr {p0} (_ bv16 32)))))\n"));
+        smt.push_str(&format!("(declare-const {r1} (_ BitVec 32))(assert (= {r1} (bvadd (bvmul (_ bv36969 32) (bvand {p1} (_ bv65535 32))) (bvlshr {p1} (_ bv16 32)))))\n"));
+        smt.push_str(&format!("(assert (= (bvor (bvshl ((_ zero_extend 20) (bvand {r0} (_ bv1048575 32))) (_ bv32 52)) ((_ zero_extend 20) (bvand {r1} (_ bv4293918720 32)))) (_ bv{mi} 52)))\n"));
+        p0 = r0;
+        p1 = r1;
+    }
+    smt.push_str("(check-sat)\n(get-value (s0 s1))\n");
+    let path = std::env::temp_dir().join(format!("v8a_{}.smt2", std::process::id()));
+    std::fs::write(&path, &smt).ok()?;
+    let out = Command::new("z3").arg("-T:120").arg(&path).output().ok()?;
+    let _ = std::fs::remove_file(&path);
+    let text = String::from_utf8_lossy(&out.stdout);
+    if !text.contains("sat") || text.starts_with("unsat") {
+        return None;
+    }
+    let h: Vec<u64> = text.split("#x").skip(1)
+        .filter_map(|s| u64::from_str_radix(&s.chars().take_while(|c| c.is_ascii_hexdigit()).collect::<String>(), 16).ok())
+        .collect();
+    if h.len() < 2 {
+        return None;
+    }
+    let (s0, s1) = (h[0] as u32, h[1] as u32);
+    if generate_stage_a(s0, s1, values.len()).iter().zip(values).all(|(a, b)| (a - b).abs() < 1e-15) {
+        Some((s0, s1))
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stage_a_round_trip() {
+        let v = generate_stage_a(0xaa86_0f70, 0x3f41_77bd, 64);
+        assert!(v.iter().all(|d| (0.0..1.0).contains(d)));
+        assert_eq!(generate_stage_a(0xaa86_0f70, 0x3f41_77bd, 64), v); // deterministic
+    }
 
     #[test]
     fn round_trip_shift16() {

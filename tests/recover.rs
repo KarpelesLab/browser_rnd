@@ -83,6 +83,43 @@ fn modern_v8_xorshift128p() {
 }
 
 #[test]
+fn early_v8_mwc_stage_a() {
+    // Chrome 48: MWC 18030/36969 with the %_ConstructDouble conversion. Needs z3.
+    if std::process::Command::new("z3").arg("--version").output().is_err() {
+        eprintln!("skip: z3 not installed");
+        return;
+    }
+    let Some(v) = load("chrome/chrome48.txt") else {
+        eprintln!("skip: fixture missing");
+        return;
+    };
+    let (s0, s1) = v8_legacy::recover_stage_a(&v).expect("stage-A recover failed");
+    assert!(v8_legacy::generate_stage_a(s0, s1, v.len()).iter().zip(&v).all(|(a, b)| (a - b).abs() < 1e-15));
+}
+
+#[test]
+fn early_v8_xorshift128p_stage_b() {
+    // Chrome ~49-55: xorshift128+ in-order, low 52 bits of (s0+s1). Needs z3.
+    if std::process::Command::new("z3").arg("--version").output().is_err() {
+        eprintln!("skip: z3 not installed");
+        return;
+    }
+    let mut tried = 0;
+    for rel in ["chrome/chrome49.txt", "chrome/chrome50.txt", "vivaldi/vivaldi1.0.txt"] {
+        let Some(v) = load(rel) else { continue };
+        tried += 1;
+        let state = v8::recover_early(&v).unwrap_or_else(|| panic!("{rel}: stage-B recover failed"));
+        assert!(
+            v8::generate_early(state, v.len()).iter().zip(&v).all(|(a, b)| (a - b).abs() < 1e-15),
+            "{rel}: reproduction mismatch"
+        );
+    }
+    if tried == 0 {
+        eprintln!("skip: no early-V8 fixtures");
+    }
+}
+
+#[test]
 fn internet_explorer_drand48_27_27() {
     // JScript (IE6/7/8) and early Chakra (IE9/10/11) share one generator.
     let mut tried = 0;
