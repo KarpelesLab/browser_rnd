@@ -160,9 +160,13 @@ checked it against each capture's `epoch`:
   CSPRNG** on Windows), MurmurHash3-whitened — so 4.9–5.3 streams are **not** time-
   reconstructable on any platform, only state-recoverable from outputs. (The time-only
   Windows weak fallback that briefly existed in 2013 never shipped for `Math.random` —
-  it predated 3.24 wiring the isolate RNG into it. In-browser, Chrome also installs an
-  entropy source from ~V8 3.14, short-circuiting the shim; only Chrome 1 / earliest
-  standalone bottom out at the clock.)
+  it predated 3.24 wiring the isolate RNG into it.) **In-browser, the cliff is earlier:
+  ~Chrome 15 (July 2011)**, when Blink first installed an OS-CSPRNG entropy source via
+  `V8::SetEntropySource` (`cryptographicallyRandomValues` → today `base::RandBytes`,
+  unchanged randomness through years of plumbing churn). So **Chrome ≥ 15 is always
+  CSPRNG-seeded**; only **Chrome < 15** (Chrome 1, and `chrome10`/March-2011 here)
+  bottoms out at `srand(TimeCurrentMillis)` — same time-seed class, same process-global
+  warmup caveat as Chrome 1.
 - **Old Firefox (drand48) has its own seed-quality cliff at FF24/25.** The LCG never
   changed, only the seed: FF14–20 `(PRMJ_Now()/1000) ^ cx ^ cx->next` (ms + heap
   pointers); FF21–~24 `(PRMJ_Now()_µs << 8) ^ rngNonce++` (µs + counter, predictable
