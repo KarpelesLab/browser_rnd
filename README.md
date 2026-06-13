@@ -145,6 +145,19 @@ checked it against each capture's `epoch`:
   boot session the seed is a high-resolution timer: knowing one seed + the elapsed
   time predicts the next to within timing jitter (a same-session brute of the low
   unpredictable RDTSC bits; the boot offset blocks absolute wall-clock recovery).
+- **Chrome 1 is wall-clock-ms seeded** — `srand((unsigned)TimeCurrentMillis())` once
+  at process startup (Windows path). Confirmed: stepping the recovered rand state back
+  lands on values just under `epoch_ms & 0xFFFFFFFF`. But the libc stream is *process-
+  global*, so a mid-session capture has a large unknown warmup (~20k prior Math.random
+  here) and the `(startup_ms, warmup_k)` tradeoff leaves many consistent candidates —
+  unique seed recovery needs a capture taken near startup (small warmup).
+- **The V8 seed-quality cliff is at V8 3.24** (late 2013). Before it, default/standalone
+  V8 ultimately seeds from `srandom(TimeCurrentMillis())` (ms granularity, time-
+  predictable). From 3.24 on, seeds come from a per-isolate RNG backed by `/dev/urandom`
+  (`rand_s()` on Windows), MurmurHash3-whitened — so a 4.9–5.3 stream is **not** time-
+  reconstructable, only state-recoverable from outputs. (In-browser, Chrome installs an
+  entropy source from ~V8 3.14, so even 3.14–3.23 streams aren't time-seeded there;
+  only Chrome 1 / earliest standalone bottom out at the clock.)
 - **Safari GameRand has a real 32-bit seed weakness.** Its entire 64-bit state
   derives from one 32-bit seed (`m_low = seed ^ 0x49616E42`, `m_high = seed`), so
   `high ^ low == 0x49616E42` exactly at seed time. `jsc::recover_seed` steps the

@@ -672,18 +672,21 @@ fn main() {
                 let md = 1u64 << 32;
                 let mut inv = 1u64; for _ in 0..6 { inv = inv.wrapping_mul(2u64.wrapping_sub(214013u64.wrapping_mul(inv))); } inv &= md - 1;
                 let back = |s: u64| ((s + md - 2531011) & (md - 1)).wrapping_mul(inv) & (md - 1);
-                let es = (e / 1000) as u64;
+                // srandom(TimeCurrentMillis()): seed = startup_ms & 0xFFFFFFFF.
+                let cap_lo = (e as u64) & 0xFFFF_FFFF; // capture ms, low 32
                 let mut s = st as u64;
                 let mut hits = 0;
-                for k in 0..2_000_000u64 {
-                    if s + 600 >= es && s <= es + 5 {
-                        println!("  hit: srand seed={s} ({:+} s vs epoch) at k={k} rand-calls back", s as i64 - es as i64);
+                for k in 0..5_000_000u64 {
+                    // candidate startup_ms = s, reconstructed near capture time
+                    let delta = (cap_lo + (1u64 << 32) - s) & 0xFFFF_FFFF; // ms before capture
+                    if delta <= 600_000 {
+                        println!("  hit: srand seed={s} = startup {delta} ms before capture, at k={k} rand-calls back");
                         hits += 1;
                         if hits >= 8 { break; }
                     }
                     s = back(s);
                 }
-                if hits == 0 { println!("  no srand(time_s) seed within 600s in 2M steps -> not wall-clock srand"); }
+                if hits == 0 { println!("  no srandom(TimeCurrentMillis) seed within 10 min in 5M steps"); }
             } else if let Some(seed) = spidermonkey_legacy::recover(v) {
                 println!("epoch={epoch}\n  oldFF drand48 seed(48b) = {seed:#014x} = {seed}  (epoch_us={})", e * 1000);
             } else {
