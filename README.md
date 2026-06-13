@@ -21,6 +21,35 @@ its recovery is GF(2)-linear), while SpiderMonkey/JSC sum both lanes (`s0+s1`,
 nonlinear over GF(2) → solved with z3). Older engines used entirely different
 generators — see the full table below, which is the authoritative status.
 
+## Prediction API
+
+One call identifies the engine/era and returns a predictor that extends the
+stream both ways (`src/predict.rs`):
+
+```rust
+let p = browser_rnd::predict::recover(&values).unwrap();   // a few consecutive Math.random() outputs
+println!("{} — {}", p.id().engine, p.id().algorithm);      // e.g. "V8 — xorshift128+ (s0>>12, reversed cache)"
+let after  = p.forward(10);   // the next 10 values the page will produce
+let before = p.backward(10);  // the 10 values it produced before the capture
+```
+
+`predict::identify(&values)` returns just the `Identification` (engine, algorithm,
+browsers, grid, whether time-seeded, and `predictable`). Presto/Opera is identified
+but `predictable == false` (SNOW 2.0 CSPRNG — no state to recover). From the CLI:
+
+```
+$ browser_rnd predict samples/ie/ie6-winxp.txt -n 3
+engine:      JScript/Chakra
+algorithm:   drand48 48-bit LCG (27+27 → 2⁻⁵⁴)
+browsers:    Internet Explorer 6–11
+...
+3 values BEFORE / AFTER the capture: ...
+```
+
+Validated by held-out tests (`tests/predict.rs`): hand the predictor a middle slice
+of a *real* capture and it reconstructs the surrounding values it never saw, forward
+and backward, for every engine family.
+
 ## Workflow
 
 1. **Capture.** Open `collector/index.html` in the target browser. It runs in

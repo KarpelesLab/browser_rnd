@@ -2,6 +2,7 @@
 name = "browser_rnd"
 version = "0.1.0"
 edition = "2021"
+default-run = "browser_rnd"
 description = "Analyze, reproduce, reverse engineer and brute force browser Math.random() PRNGs"
 license = "MIT"
 

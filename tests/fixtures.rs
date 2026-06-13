@@ -42,6 +42,11 @@ fn fixtures_are_well_formed() {
         let fname = path.strip_prefix(&dir).unwrap_or(&path).to_string_lossy().to_string();
 
         let text = fs::read_to_string(&path).expect("read fixture");
+        // Some fixtures hold multiple captures (e.g. the *-twice same-machine pairs);
+        // those are parsed per-capture elsewhere, so skip them in the single-sample walk.
+        if text.matches("# browser_rnd sample v1").count() > 1 {
+            continue;
+        }
         let sample = Sample::parse(&text).unwrap_or_else(|e| panic!("{fname}: parse error: {e}"));
 
         // Integrity: the declared `count:` header must match the values present.
