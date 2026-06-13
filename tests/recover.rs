@@ -22,7 +22,7 @@ fn load(rel: &str) -> Option<Vec<f64>> {
 #[test]
 fn old_spidermonkey_drand48() {
     let mut tried = 0;
-    for rel in ["firefox/firefox1-winxp.txt", "firefox/firefox3.txt"] {
+    for rel in ["firefox/firefox1-winxp.txt", "firefox/firefox3.txt", "firefox/firefox28-linux.txt"] {
         let Some(v) = load(rel) else { continue };
         tried += 1;
         let seed = spidermonkey_legacy::recover(&v).unwrap_or_else(|| panic!("{rel}: drand48"));
