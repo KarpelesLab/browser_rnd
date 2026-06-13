@@ -163,6 +163,16 @@ checked it against each capture's `epoch`:
   it predated 3.24 wiring the isolate RNG into it. In-browser, Chrome also installs an
   entropy source from ~V8 3.14, short-circuiting the shim; only Chrome 1 / earliest
   standalone bottom out at the clock.)
+- **Old Firefox (drand48) has its own seed-quality cliff at FF24/25.** The LCG never
+  changed, only the seed: FF14–20 `(PRMJ_Now()/1000) ^ cx ^ cx->next` (ms + heap
+  pointers); FF21–~24 `(PRMJ_Now()_µs << 8) ^ rngNonce++` (µs + counter, predictable
+  by design); FF25–34 `/dev/urandom` / `rand_s()` (time only as fallback). Empirically:
+  `firefox24`/`firefox26` show **no** time match → Era 3 (urandom), confirming the cliff;
+  `firefox1`/`firefox3` (pre-FF14 Era 0) have states sharing their **top 24 bits across
+  two different machines/timezones captured ~9 min apart in absolute time** — a chance
+  of ~6e-8, so those *are* time-seeded (the exact Era-0 formula isn't one of the FF14+
+  ones and needs the older source). So drand48 streams from FF ≤ ~23 are seed-predictable;
+  FF25+ only state-recoverable from outputs.
 - **Safari GameRand has a real 32-bit seed weakness.** Its entire 64-bit state
   derives from one 32-bit seed (`m_low = seed ^ 0x49616E42`, `m_high = seed`), so
   `high ^ low == 0x49616E42` exactly at seed time. `jsc::recover_seed` steps the

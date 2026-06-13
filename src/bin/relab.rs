@@ -653,6 +653,38 @@ fn main() {
                 None => println!("  not JSC GameRand"),
             }
         }
+        "ffseedtime" => {
+            // Old SpiderMonkey drand48: recover the initial LCG state, then brute the
+            // seed-derivation against the epoch. init: seed^=seed>>16; state=(seed^MULT)&MASK.
+            // Era1 (FF14-20): seed = (ms)/1 ^ ptr ^ ptr   (pointers unknown)
+            // Era2 (FF21-~24): seed = (PRMJ_Now_us << 8) ^ nonce++   (brute us sub-ms + nonce)
+            // Era3 (FF25+): /dev/urandom  -> brute fails (not time)
+            use browser_rnd::engines::spidermonkey_legacy;
+            const MULT: u64 = 0x5DEECE66D;
+            const MASK: u64 = (1 << 48) - 1;
+            let e: u64 = sample.meta.get("epoch").and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(state) = spidermonkey_legacy::recover(v) else { println!("  not drand48"); return; };
+            let init = |raw: u64| -> u64 { ((raw ^ (raw >> 16)) ^ MULT) & MASK };
+            let base_us = (e * 1000) as i64; // PRMJ_Now microseconds
+            // scan formulas × a ±5s window × small nonce/pointer-low-bits
+            let formulas: [(&str, fn(u64) -> u64); 3] = [
+                ("us", |u| u), ("us<<8", |u| u << 8), ("us/1000=ms", |u| u / 1000),
+            ];
+            let mut found = false;
+            'scan: for (name, f) in formulas {
+                for du in -5_000_000i64..=5_000_000 {
+                    let u = (base_us + du) as u64;
+                    for nonce in 0..8u64 {
+                        if init(f(u) ^ nonce) == state {
+                            println!("  HIT formula={name}: PRMJ_Now={u}us (epoch{:+}us), nonce/Plow={nonce}", du);
+                            found = true; break 'scan;
+                        }
+                    }
+                }
+            }
+            if !found { println!("  no time-seed match in ±5s (Era3 urandom, warmup>0, or pointer-XOR)"); }
+            println!("  recovered initial state = {state:#014x}");
+        }
         "seedtime" => {
             use browser_rnd::engines::{jscript, spidermonkey_legacy, v8_libc};
             let epoch = sample.meta.get("epoch").cloned().unwrap_or_default();
