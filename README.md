@@ -134,12 +134,17 @@ The generators' *state* recovers from outputs regardless of seeding. Recovering
 the original **seed** (everything from page load) is a separate question, and we
 checked it against each capture's `epoch`:
 
-- **Not recoverable from wall-clock time.** Every engine's seed involves time, but
-  the wrong kind: IE/Chakra seed from `QueryPerformanceCounter`+`RDTSC`/IO counters
-  (since-boot, not wall-clock) XOR'd with entropy; old Firefox XORs `PRMJ_Now()` µs
-  with `/dev/urandom`/`rand_s`; Chrome 1's `srand` is not `srand(time())` (a tight
-  ±600s brute over 2M steps finds nothing). So the capture epoch does **not** brute
-  the seed — these aren't the naive `srand(time(NULL))` case.
+- **Not recoverable from *wall-clock* time, but IE is timer-seeded.** Every engine's
+  seed involves time, just not wall-clock: old Firefox XORs `PRMJ_Now()` µs with
+  `/dev/urandom`/`rand_s`; Chrome 1's `srand` is not `srand(time())` (a tight ±600s
+  brute over 2M steps finds nothing). So the capture epoch alone can't brute the seed.
+- **IE6 seed = `(RDTSC << 13) | 0x6F`** — *proven* with two captures from the same
+  machine 5.735 s apart (`samples/ie/ie6-twice-winxp.txt`, `relab seedpair`): the low
+  13 bits are a fixed constant (`0x6F`, identical across both) and the high 35 bits
+  advanced by 21.85 billion → **3.810 GHz**, i.e. the CPU cycle counter. So within a
+  boot session the seed is a high-resolution timer: knowing one seed + the elapsed
+  time predicts the next to within timing jitter (a same-session brute of the low
+  unpredictable RDTSC bits; the boot offset blocks absolute wall-clock recovery).
 - **Safari GameRand has a real 32-bit seed weakness.** Its entire 64-bit state
   derives from one 32-bit seed (`m_low = seed ^ 0x49616E42`, `m_high = seed`), so
   `high ^ low == 0x49616E42` exactly at seed time. `jsc::recover_seed` steps the

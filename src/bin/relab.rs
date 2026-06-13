@@ -590,6 +590,32 @@ fn main() {
         std::process::exit(2);
     }
     let exp = &args[1];
+    if exp == "seedpair" {
+        // Multi-capture file (same machine, different load times): recover each
+        // drand48 seed and check for a fixed-low-bit init + a high-resolution
+        // timer in the upper bits, calibrated against the epoch delta.
+        let text = fs::read_to_string(&args[2]).expect("read");
+        let caps: Vec<&str> = text.split("# browser_rnd sample v1").filter(|s| s.contains("---")).collect();
+        let mut seeds = Vec::new();
+        for cap in &caps {
+            let s = Sample::parse(&format!("# browser_rnd sample v1{cap}")).expect("parse");
+            let seed = browser_rnd::engines::jscript::recover(&s.values).expect("recover");
+            let epoch: i128 = s.meta.get("epoch").and_then(|e| e.parse().ok()).unwrap_or(0);
+            println!("  epoch={epoch}  seed={seed:#014x}  low13={:#x}", seed & 0x1FFF);
+            seeds.push((epoch, seed));
+        }
+        for w in seeds.windows(2) {
+            let (e0, s0) = w[0];
+            let (e1, s1) = w[1];
+            let xor = s0 ^ s1;
+            let low_fixed = xor.trailing_zeros();
+            let de = (e1 - e0) as f64 / 1000.0;
+            let dt = (s1 >> low_fixed) as i128 - (s0 >> low_fixed) as i128;
+            println!("  pair: low {low_fixed} bits identical; Δtimer(>>{low_fixed})={dt} over {de}s => {:.3} GHz",
+                dt as f64 / de / 1e9);
+        }
+        return;
+    }
     let sample = load(&args[2]);
     let v = &sample.values;
     println!("loaded {} values from {}", v.len(), args[2]);
