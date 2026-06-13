@@ -627,6 +627,43 @@ fn main() {
                 None => println!("  not JSC GameRand"),
             }
         }
+        "seedtime" => {
+            use browser_rnd::engines::{jscript, spidermonkey_legacy, v8_libc};
+            let epoch = sample.meta.get("epoch").cloned().unwrap_or_default();
+            let date = sample.meta.get("date").cloned().unwrap_or_default();
+            let e: i128 = epoch.parse().unwrap_or(0);
+            if let Some((seed, back)) = browser_rnd::engines::jsc::recover_seed(v, 20_000_000) {
+                println!("epoch={epoch} ({date})");
+                println!("  Safari GameRand ORIGINAL 32-bit seed = {seed:#010x} = {seed}");
+                println!("  ({back} draws consumed before our first captured value; full state is only 32 bits)");
+            } else if let Some(seed) = jscript::recover(v) {
+                println!("epoch={epoch} ({date})\n  IE drand48 seed(48b) = {seed:#014x} = {seed}");
+                println!("  epoch_ms={e}  epoch_s={}  epoch_us={}", e / 1000, e * 1000);
+            } else if let Some(st) = v8_libc::recover(v) {
+                println!("epoch={epoch}\n  chrome1 rand state = {st:#010x} = {st}  (epoch_s={})", e / 1000);
+                // step the MSVCRT LCG backward looking for an srand(time) seed
+                // near the capture time (page loaded shortly before).
+                let md = 1u64 << 32;
+                let mut inv = 1u64; for _ in 0..6 { inv = inv.wrapping_mul(2u64.wrapping_sub(214013u64.wrapping_mul(inv))); } inv &= md - 1;
+                let back = |s: u64| ((s + md - 2531011) & (md - 1)).wrapping_mul(inv) & (md - 1);
+                let es = (e / 1000) as u64;
+                let mut s = st as u64;
+                let mut hits = 0;
+                for k in 0..2_000_000u64 {
+                    if s + 600 >= es && s <= es + 5 {
+                        println!("  hit: srand seed={s} ({:+} s vs epoch) at k={k} rand-calls back", s as i64 - es as i64);
+                        hits += 1;
+                        if hits >= 8 { break; }
+                    }
+                    s = back(s);
+                }
+                if hits == 0 { println!("  no srand(time_s) seed within 600s in 2M steps -> not wall-clock srand"); }
+            } else if let Some(seed) = spidermonkey_legacy::recover(v) {
+                println!("epoch={epoch}\n  oldFF drand48 seed(48b) = {seed:#014x} = {seed}  (epoch_us={})", e * 1000);
+            } else {
+                println!("epoch={epoch}  (no time-seedable model matched)");
+            }
+        }
         "conv" => conv(v),
         "jstlcg" => {
             // JScript hypothesis: value = (top27(s_a)<<27 | top27(s_b)) / 2^54,

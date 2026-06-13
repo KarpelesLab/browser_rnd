@@ -128,6 +128,25 @@ conversion + the C++ FixedDoubleArray cache only arrive ~V8 7.0 / Chrome 70 — 
 the stable form `v8::recover` handles with plain GF(2). The xorshift shift triple
 (23,17,26) is constant from 4.9 through ≥7.0.
 
+## Seeding (and why time-brute doesn't work)
+
+The generators' *state* recovers from outputs regardless of seeding. Recovering
+the original **seed** (everything from page load) is a separate question, and we
+checked it against each capture's `epoch`:
+
+- **Not recoverable from wall-clock time.** Every engine's seed involves time, but
+  the wrong kind: IE/Chakra seed from `QueryPerformanceCounter`+`RDTSC`/IO counters
+  (since-boot, not wall-clock) XOR'd with entropy; old Firefox XORs `PRMJ_Now()` µs
+  with `/dev/urandom`/`rand_s`; Chrome 1's `srand` is not `srand(time())` (a tight
+  ±600s brute over 2M steps finds nothing). So the capture epoch does **not** brute
+  the seed — these aren't the naive `srand(time(NULL))` case.
+- **Safari GameRand has a real 32-bit seed weakness.** Its entire 64-bit state
+  derives from one 32-bit seed (`m_low = seed ^ 0x49616E42`, `m_high = seed`), so
+  `high ^ low == 0x49616E42` exactly at seed time. `jsc::recover_seed` steps the
+  state backward to that invariant and recovers the **exact per-page seed**
+  (validated on `safari5.1.7`: `0x5C99A462`, 0 draws of warmup). 32 bits of entropy
+  means the whole stream is brute-forceable even without observing outputs.
+
 ## Infra status
 
 - [x] xorshift128+ / MWC / LCG / GameRand generators (forward + recover)

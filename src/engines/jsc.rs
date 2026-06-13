@@ -77,9 +77,45 @@ pub fn recover(values: &[f64]) -> Option<GameRand> {
     }
 }
 
+/// Step the GameRand state backward one advance (the advance is invertible).
+fn step_back(s: GameRand) -> GameRand {
+    let low = s.low.wrapping_sub(s.high); // prev_low (since low' = low + high')
+    let high = s.high.wrapping_sub(low).rotate_right(16); // prev_high
+    GameRand { low, high }
+}
+
+/// Recover the original 32-bit seed Safari was given (from `randomNumber()` per
+/// global object). GameRand seeds with `m_low = seed ^ 0x49616E42`, `m_high =
+/// seed`, so `high ^ low == 0x49616E42` exactly at seed time. We recover the
+/// running state, then step backward until that invariant holds. Returns the
+/// seed and how many draws preceded the first observed value, or `None` if not
+/// found within `max_back` steps. The whole state is just 32 bits of entropy.
+pub fn recover_seed(values: &[f64], max_back: usize) -> Option<(u32, usize)> {
+    const IANB: u32 = 0x4961_6E42;
+    let mut s = recover(values)?; // state before the first observed advance
+    for k in 0..max_back {
+        if s.high ^ s.low == IANB {
+            return Some((s.high, k));
+        }
+        s = step_back(s);
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn seed_round_trip() {
+        // Seed, advance a warmup, capture — then recover the exact seed.
+        let mut st = GameRand::seeded(0x0badf00d);
+        for _ in 0..137 { st.advance(); } // warmup draws before our capture
+        let v = generate(st, 300);
+        let (seed, back) = recover_seed(&v, 1_000_000).expect("seed");
+        assert_eq!(seed, 0x0badf00d);
+        assert_eq!(back, 137);
+    }
 
     #[test]
     fn recover_round_trip() {
