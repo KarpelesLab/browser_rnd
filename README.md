@@ -110,16 +110,27 @@ Notable findings:
   anchors on a value < 0.5.)
 - **Modern Firefox uses the LOW 53 bits** of `s0+s1`, not `>>11`. The addition is
   nonlinear over GF(2), so recovery uses the z3 SMT solver.
-- **V8 has 4 eras** (+ a pre-history): Chrome 1 (V8 0.3.x) had no custom PRNG —
-  `result = (hi + lo/(RAND_MAX+1))/(RAND_MAX+1)` from two host `rand()` calls (on
-  Windows, MSVCRT's 15-bit LCG → `hi·2¹⁵+lo`, the FIRST call is the low part). Then
-  MWC era1 (`<<14`), era2 (`<<16`), era3 (18030), then xorshift128+ (Chrome 49+,
-  52-bit, reversed cache of 64; recovery searches the batch offset, ~4–5).
+- **V8 has many generator eras** — the full source-verified list (exact
+  commit/version/date) is in [`docs/v8-math-random.md`](docs/v8-math-random.md).
+  In short: Chrome 1 (V8 ≤1.2.7) had no custom PRNG —
+  `result = (hi + lo/(RAND_MAX+1))/(RAND_MAX+1)` from two host `rand()`/`random()`
+  calls (on Windows, MSVCRT's 15-bit LCG → `hi·2¹⁵+lo`, the FIRST call is the low
+  part). Then **MWC1616** in four sub-forms (`<<16`/36969-high → `<<14` →
+  `<<16`/18273-high → 18030 "Marsaglia-3D" fix), then **xorshift128+** from Chrome
+  49: first the nonlinear `s0+s1` sum (z3); the linear single-word `s0>>12` from
+  V8 7.1 / Chrome ~71 (GF(2)); `>>11 / 2⁵³` from V8 13.5; and the `s0+s1` add
+  *resurrected* in V8 14.4 (Nov 2025), nonlinear again.
 - **Presto (Opera) is the lone holdout** — it deliberately uses a SNOW 2.0
   CSPRNG continuously reseeded with entropy, so its `Math.random()` is genuinely
   unpredictable (no fixed state to recover). Every other engine here is breakable.
 
 ### Pinned version transitions (from the sample sweep)
+
+> **[`docs/v8-math-random.md`](docs/v8-math-random.md) is authoritative for which
+> generator ships in which V8 version** (reconstructed from the V8 git tree with
+> exact commit/version/date). The map below is the *sample-sweep* view — useful
+> for the Chrome-version→algo mapping and the repo-specific recovery notes, but
+> where it disagrees on a boundary, the doc wins.
 
 The `relab id` classifier over the full sweep dates every switch:
 
@@ -143,9 +154,9 @@ changes back-to-back (per the source): **Stage A** (Chrome 48) was a conversion-
 refactor — same MWC, but the double is mantissa-stuffed via `%_ConstructDouble`
 (`(r0&0xFFFFF)<<32 | (r1&0xFFF00000)`, grid 2⁻³²). **Stage B** (Chrome 49–~55) is the
 real rewrite: xorshift128+ served **in order** with `ToDouble = (s0+s1)&mantissaMask`
-(low 52 bits of the *sum* — nonlinear, so z3). Only **later** (by Chrome 77) did V8
-switch the conversion to `s0>>12` *and* add the reversed 64-cache — the stable form
-that recovers with plain GF(2).
+(low 52 bits of the *sum* — nonlinear, so z3). Only **later** (V8 7.1 / Chrome ~71,
+per the source) did V8 switch to the single-word `s0>>12` conversion — the stable
+linear form that recovers with plain GF(2).
 
 There's a **third xorshift variant** in between: V8 5.1–5.3 (Chrome 52–53, Opera
 38–40, ~mid-2016). It keeps the Stage-B `(s0+s1)&mask52` conversion but **reverses
@@ -153,9 +164,9 @@ the cache serving order**: each batch fills slots 2..63 forward (62 outputs) and
 served top-down (slot 63 first). So within each batch of 62, observed order is the
 reverse of generation order. Recovery de-reverses a batch window, solves the in-order
 Stage-B system with z3, and searches the batch offset. The single-word `s0>>12`
-conversion + the C++ FixedDoubleArray cache only arrive ~V8 7.0 / Chrome 70 — that's
-the stable form `v8::recover` handles with plain GF(2). The xorshift shift triple
-(23,17,26) is constant from 4.9 through ≥7.0.
+conversion arrives at V8 7.1 / Chrome ~71 (the "drop the `s0+s1` add" refactor,
+`ac66c97cfdd`) — that's the stable form `v8::recover` handles with plain GF(2). The
+xorshift shift triple (23,17,26) is constant from 4.9 onward.
 
 > **Full source-verified timeline:** [`docs/v8-math-random.md`](docs/v8-math-random.md)
 > reconstructs every era from the V8 git tree with exact commit/version/date and
