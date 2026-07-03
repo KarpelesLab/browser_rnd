@@ -157,6 +157,24 @@ conversion + the C++ FixedDoubleArray cache only arrive ~V8 7.0 / Chrome 70 — 
 the stable form `v8::recover` handles with plain GF(2). The xorshift shift triple
 (23,17,26) is constant from 4.9 through ≥7.0.
 
+> **Full source-verified timeline:** [`docs/v8-math-random.md`](docs/v8-math-random.md)
+> reconstructs every era from the V8 git tree with exact commit/version/date and
+> code. It pins two boundaries the sample sweep could only interpolate — the `<<14`
+> combine began at **3.4.9** (not 3.14) and the linear `s0>>12` form at **7.1 /
+> Chrome ~71** (not 77) — and records a 4-day 2011 dev-only *4-lane* MWC
+> (multipliers 23208/27753, never shipped). **New open target:** V8 **14.4**
+> (`0596ead5b04`, Nov 2025, ≈ Chrome 144) *resurrected* the `s0+s1` add, so the
+> newest Chrome is nonlinear again (z3, like modern Firefox) and outside the GF(2)
+> path.
+>
+> The MWC multiplier **`30903` has never been used by V8 in any version** — its
+> only shipped MWC multipliers are `36969`/`18273`/`18030` (verify with
+> `git grep 30903` in the V8 tree: zero RNG hits). It gets wrongly attached to V8
+> 4.x because the [V8 blog](https://v8.dev/blog/math-random)'s illustrative
+> MWC1616 snippet prints `30903`, whereas the shipped code used `36969`. Lesson:
+> trust the engine's git tree for constants, not vendor blog snippets. Details in
+> [`docs/v8-math-random.md`](docs/v8-math-random.md#30903-has-never-been-used-by-v8--not-once-in-any-version).
+
 ## Seeding (and why time-brute doesn't work)
 
 The generators' *state* recovers from outputs regardless of seeding. Recovering

@@ -4,12 +4,15 @@
 //! Confirmed against captures + V8 source history. The eras differ only in the
 //! lane-combine and which multiplier sits in the high vs low lane:
 //!
-//! | V8        | Combine                            | high-lane | low-lane | samples |
-//! |-----------|------------------------------------|-----------|----------|---------|
-//! | 1.2–~3.x  | `(hi<<16) + (lo & 0xFFFF)`         | 36969     | 18273    | chrome10 |
-//! | 3.14–3.23 | `(s0<<14) + (s1 & 0x3FFFF)`        | 18273     | 36969    | chrome20/30, opera16 |
-//! | 3.24–3.30 | `(s0<<16) | (s1 & 0xFFFF)`         | 18273     | 36969    | opera22 |
-//! | 3.31–3.32 | `(s0<<16) | (s1 & 0xFFFF)`         | 18030     | 36969    | (Marsaglia-3D fix) |
+//! | V8         | Combine                            | high-lane | low-lane | samples |
+//! |------------|------------------------------------|-----------|----------|---------|
+//! | 1.2.8–3.4  | `(hi<<16) + (lo & 0xFFFF)`         | 36969     | 18273    | chrome10 |
+//! | 3.4.9–3.23 | `(s0<<14) + (s1 & 0x3FFFF)`        | 18273     | 36969    | chrome20/30, opera16 |
+//! | 3.23.11–29 | `(s0<<16) | (s1 & 0xFFFF)`         | 18273     | 36969    | opera22 |
+//! | 3.30.0+    | `(s0<<16) | (s1 & 0xFFFF)`         | 18030     | 36969    | (Marsaglia-3D fix) |
+//!
+//! Exact commits/dates for every V8 era (incl. the modern xorshift128+ line and a
+//! never-shipped 2011 4-lane dev experiment) are in `docs/v8-math-random.md`.
 //!
 //! (In the original V8 1.2 form the high lane was the 36969 lane — `hi`; the 3.24
 //! math.js rewrite swapped to 18273-high. Pre-V8-1.2 / Chrome 1 had no MWC at all,
