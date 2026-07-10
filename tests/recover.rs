@@ -9,7 +9,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use browser_rnd::engines::{jsc, jscript, spidermonkey, spidermonkey_legacy, v8, v8_legacy, v8_libc};
+use browser_rnd::engines::{dart, jsc, jscript, spidermonkey, spidermonkey_legacy, v8, v8_legacy, v8_libc};
 use browser_rnd::prng::XorShift128Plus;
 use browser_rnd::sample::Sample;
 
@@ -191,6 +191,31 @@ fn modern_spidermonkey_xorshift128p() {
     }
     if tried == 0 {
         eprintln!("skip: no modern SpiderMonkey fixtures");
+    }
+}
+
+#[test]
+fn flutter_dart_mwc() {
+    // Real captures from `Random(seed).nextDouble()` on the Dart VM (Flutter's
+    // native generator). Recover the 64-bit MWC state (closed-form) and reproduce
+    // the whole sequence; also recover the exact user seed from the fresh start.
+    let cases = [
+        ("dart/dart-seed12345.txt", 12345u64),
+        ("dart/dart-seed0x12345678.txt", 0x1234_5678),
+    ];
+    let mut tried = 0;
+    for (rel, seed) in cases {
+        let Some(v) = load(rel) else { continue };
+        tried += 1;
+        let state = dart::recover(&v).unwrap_or_else(|| panic!("{rel}: dart recover failed"));
+        assert!(
+            dart::generate(state, v.len()).iter().zip(&v).all(|(a, b)| (a - b).abs() < 1e-15),
+            "{rel}: reproduction mismatch"
+        );
+        assert_eq!(dart::recover_seed(&v), Some(seed), "{rel}: seed recovery");
+    }
+    if tried == 0 {
+        eprintln!("skip: no Dart fixtures");
     }
 }
 

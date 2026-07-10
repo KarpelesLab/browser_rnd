@@ -20,9 +20,15 @@ vendor dir maps to (see the root README's status table for details):
 | `safari/`  | JavaScriptCore | GameRand (Safari ≤8) |
 | `edge/`, `brave/`, `vivaldi/` | V8 | xorshift128+ |
 | `mypal/`   | SpiderMonkey (Goanna) | xorshift128+ |
+| `dart/`    | Dart (Flutter) | MWC `A=0xffffda61` (VM/AOT/wasm) — not a browser |
 
 (The chrome 28–50 and firefox 24–50 captures bracket the MWC→xorshift and
 drand48→xorshift transitions; opera 10.50/11.60 are later Presto.)
+
+`dart/` is the exception to "from a browser": those come from the Dart runtime
+directly — `Random(seed).nextDouble()` in a tiny Dart program — with the seed
+recorded in the header so seed recovery is testable. The filename encodes the
+seed (`dart-seed12345.txt`).
 
 ## How to add one
 

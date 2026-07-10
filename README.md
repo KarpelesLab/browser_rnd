@@ -15,11 +15,19 @@ engines:
 | **V8** | Chrome, Edge, Opera, Brave, Node | xorshift128+ | `bitcast((s0>>12)\|exp) - 1` (52-bit) | **reversed** cache of 64 |
 | **SpiderMonkey** | Firefox | xorshift128+ | `((s0+s1) & (2⁵³-1)) * 2⁻⁵³` (**low** 53) | in order |
 | **JavaScriptCore** | Safari ≤8, iOS | GameRand (2×u32) | `m_high / 2³²` (32-bit) | in order |
+| **Dart** | **Flutter** apps (VM/AOT/wasm) | MWC `A=0xffffda61` (u64) | `(bits26·2²⁷+bits27) / 2⁵³` (53-bit) | in order |
 
 The conversion is the part that distinguishes them: V8 reads `s0` directly (so
 its recovery is GF(2)-linear), while SpiderMonkey/JSC sum both lanes (`s0+s1`,
 nonlinear over GF(2) → solved with z3). Older engines used entirely different
 generators — see the full table below, which is the authoritative status.
+
+**Flutter** doesn't fit the browser rows: a Flutter app draws from Dart's
+`dart:math` `Random`, a Multiply-With-Carry generator (`A=0xffffda61`), *not* a
+browser `Math.random()`. It's the same on every Flutter version and native
+platform; only the web target differs (seedless `Random()` there delegates to
+the host browser's `Math.random()`). Full analysis:
+[`docs/dart-flutter-random.md`](docs/dart-flutter-random.md).
 
 ## Prediction API
 
@@ -72,7 +80,8 @@ src/prng/              raw generators: xorshift128+ (invertible), MWC, LCG
 src/engines/           per-browser models (generate + recover):
                          v8, v8_legacy (MWC eras), v8_libc (Chrome 1),
                          spidermonkey, spidermonkey_legacy (drand48),
-                         jscript (IE6-11), jsc (Safari GameRand), presto
+                         jscript (IE6-11), jsc (Safari GameRand), presto,
+                         dart (Flutter — Dart Random MWC)
 src/gf2.rs             GF(2) linear solver (modern V8 recovery)
 src/sample.rs          parse captured textarea dumps
 src/analyze.rs         engine fingerprinting (grid / mantissa resolution + UA)
@@ -102,6 +111,7 @@ double-conversion denominator — the first thing the fingerprint pins down.
 | JSC (Safari ≤8) | Safari 5.1.7 | 2⁻³² | GameRand (Ian Bullard), 2×u32 | closed-form | ✅ cracked |
 | Presto | Opera 10 | 2⁻⁵³ | **SNOW 2.0 CSPRNG** + entropy reseeding | **infeasible by design** | 🔒 unpredictable |
 | oldest V8 | Chrome 1 (2008, Win) | 2⁻³⁰ | MSVCRT `rand()` × 2, `hi·2¹⁵+lo` | 2¹⁷ brute | ✅ cracked |
+| **Dart / Flutter** | Flutter VM/AOT/wasm (real captures) | 2⁻⁵³ | **MWC `A=0xffffda61`**, low 26+27 of 2 steps | **2¹¹ brute (closed-form)** | ✅ cracked |
 
 Notable findings:
 - **IE 6–11 all share one generator**: drand48 (`0x5DEECE66D`,+11), two steps/call,
@@ -123,6 +133,13 @@ Notable findings:
 - **Presto (Opera) is the lone holdout** — it deliberately uses a SNOW 2.0
   CSPRNG continuously reseeded with entropy, so its `Math.random()` is genuinely
   unpredictable (no fixed state to recover). Every other engine here is breakable.
+- **Flutter/Dart is one unchanging MWC** (`A=0xffffda61`, since ~Dart 0.8, 2013 —
+  no eras). Because `A = 2³² − 0x259f`, one step is `lo' = (hi − 9631·lo) mod 2³²`,
+  so two consecutive `lo` words pin the 64-bit state → a 2¹¹ brute over the
+  truncated high bits recovers it **with no z3**. Seed too (`Random(seed)` runs a
+  Thomas-Wang `mix64` + 4 warm-up cranks, all invertible). The one platform quirk:
+  **seedless Flutter *web* uses the browser's `Math.random()`**, not the MWC.
+  See [`docs/dart-flutter-random.md`](docs/dart-flutter-random.md).
 
 ### Pinned version transitions (from the sample sweep)
 

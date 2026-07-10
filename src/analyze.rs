@@ -57,7 +57,7 @@ pub fn mantissa_resolution(values: &[f64]) -> u32 {
 pub fn fingerprint(sample: &Sample) -> Fingerprint {
     let resolution_bits = mantissa_resolution(&sample.values);
     let structural_candidates = match resolution_bits {
-        53 => vec![Engine::SpiderMonkey, Engine::JavaScriptCore],
+        53 => vec![Engine::SpiderMonkey, Engine::JavaScriptCore, Engine::Dart],
         52 => vec![Engine::V8],
         // Below the modern engines' width ⇒ legacy / low-entropy generator.
         0..=40 => vec![Engine::JScript],

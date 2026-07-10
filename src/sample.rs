@@ -86,7 +86,11 @@ impl Sample {
         let ua = self.user_agent()?.to_ascii_lowercase();
         // Order matters: Edge/Opera/Brave all carry "chrome"; old IE carries
         // "msie" or "trident".
-        if ua.contains("msie") || ua.contains("trident") {
+        if ua.starts_with("dart") || ua.contains("flutter") {
+            // Native Flutter/Dart capture (not a browser). Seedless Flutter *web*
+            // uses the browser's Math.random and looks like a normal browser UA.
+            Some(Engine::Dart)
+        } else if ua.contains("msie") || ua.contains("trident") {
             Some(Engine::JScript)
         } else if ua.contains("firefox") || ua.contains("gecko/") {
             Some(Engine::SpiderMonkey)

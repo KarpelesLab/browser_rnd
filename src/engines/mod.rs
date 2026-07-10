@@ -6,6 +6,7 @@
 //! browsers — the underyling xorshift128+ recurrence is shared by V8,
 //! SpiderMonkey and JSC.
 
+pub mod dart;
 pub mod jsc;
 pub mod jscript;
 pub mod presto;
@@ -26,6 +27,8 @@ pub enum Engine {
     JavaScriptCore,
     /// Legacy MSIE 6/7/8 JScript.
     JScript,
+    /// Dart `Random` — the generator behind Flutter apps.
+    Dart,
 }
 
 impl Engine {
@@ -35,6 +38,7 @@ impl Engine {
             Engine::SpiderMonkey => "spidermonkey",
             Engine::JavaScriptCore => "javascriptcore",
             Engine::JScript => "jscript",
+            Engine::Dart => "dart",
         }
     }
 
@@ -45,6 +49,7 @@ impl Engine {
             Engine::SpiderMonkey,
             Engine::JavaScriptCore,
             Engine::JScript,
+            Engine::Dart,
         ]
     }
 }

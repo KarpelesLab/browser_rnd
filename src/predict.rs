@@ -14,7 +14,7 @@
 //!
 //! Presto/Opera is identified but not predictable (SNOW 2.0 CSPRNG).
 
-use crate::engines::{jsc, jscript, spidermonkey, spidermonkey_legacy, v8, v8_legacy, v8_libc};
+use crate::engines::{dart, jsc, jscript, spidermonkey, spidermonkey_legacy, v8, v8_legacy, v8_libc};
 use crate::prng::XorShift128Plus;
 
 /// What produced a capture.
@@ -40,6 +40,7 @@ enum Gen {
     Drand48Sm(u64),                                    // 48-bit LCG, 26+27, /2^53
     Drand48Ie(u64),                                    // 48-bit LCG, 27+27, /2^54
     GameRand(jsc::GameRand),
+    DartMwc(u64),                                      // MWC A=0xffffda61, 26+27, /2^53
 }
 
 /// A recovered generator positioned at a capture, able to extend it both ways.
@@ -145,6 +146,7 @@ impl Predictor {
             Gen::Drand48Sm(seed) => spidermonkey_legacy::generate(*seed, o + n)[o..].to_vec(),
             Gen::Drand48Ie(seed) => jscript::generate(*seed, o + n)[o..].to_vec(),
             Gen::GameRand(st) => jsc::generate(*st, o + n)[o..].to_vec(),
+            Gen::DartMwc(st) => dart::generate(*st, o + n)[o..].to_vec(),
         }
     }
 
@@ -211,6 +213,12 @@ impl Predictor {
                 for _ in 0..n { s = gamerand_back(s); }
                 jsc::generate(s, n)
             }
+            // Dart MWC: two states per nextDouble, so rewind 2·n states.
+            Gen::DartMwc(st) => {
+                let mut s = *st;
+                for _ in 0..2 * n { s = dart::prev_state(s); }
+                dart::generate(s, n)
+            }
         }
     }
 }
@@ -259,6 +267,9 @@ pub fn recover(values: &[f64]) -> Option<Predictor> {
             }
             if let Some(seed) = spidermonkey::recover(values) {
                 return wrap(id("SpiderMonkey", "xorshift128+ ((s0+s1) low 53)", "Firefox 49+, Pale Moon", 53, "no — OS CSPRNG"), Gen::SmModern(seed));
+            }
+            if let Some(state) = dart::recover(values) {
+                return wrap(id("Dart", "MWC A=0xffffda61 (26+27 → 2⁻⁵³)", "Flutter (VM/AOT/wasm; web only if seeded)", 53, "seed→mix64; seedless VM falls back to µs time"), Gen::DartMwc(state));
             }
             None
         }
@@ -322,6 +333,10 @@ mod tests {
     #[test]
     fn gamerand() {
         check(&jsc::generate(jsc::GameRand::seeded(0xdead_beef), 200), "JavaScriptCore");
+    }
+    #[test]
+    fn dart_mwc() {
+        check(&dart::generate(dart::seeded(0xC0FF_EE42), 200), "Dart");
     }
     #[test]
     fn modern_v8() {
