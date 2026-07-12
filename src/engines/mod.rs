@@ -7,6 +7,7 @@
 //! SpiderMonkey and JSC.
 
 pub mod dart;
+pub mod hermes;
 pub mod jsc;
 pub mod jscript;
 pub mod presto;
@@ -29,6 +30,8 @@ pub enum Engine {
     JScript,
     /// Dart `Random` — the generator behind Flutter apps.
     Dart,
+    /// Hermes — the engine behind React Native apps.
+    Hermes,
 }
 
 impl Engine {
@@ -39,6 +42,7 @@ impl Engine {
             Engine::JavaScriptCore => "javascriptcore",
             Engine::JScript => "jscript",
             Engine::Dart => "dart",
+            Engine::Hermes => "hermes",
         }
     }
 
@@ -50,6 +54,7 @@ impl Engine {
             Engine::JavaScriptCore,
             Engine::JScript,
             Engine::Dart,
+            Engine::Hermes,
         ]
     }
 }

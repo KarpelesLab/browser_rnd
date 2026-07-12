@@ -21,6 +21,7 @@ vendor dir maps to (see the root README's status table for details):
 | `edge/`, `brave/`, `vivaldi/` | V8 | xorshift128+ |
 | `mypal/`   | SpiderMonkey (Goanna) | xorshift128+ |
 | `dart/`    | Dart (Flutter) | MWC `A=0xffffda61` (VM/AOT/wasm) — not a browser |
+| `hermes/`  | Hermes (React Native) | `std::minstd_rand` LCG (era 1) → `std::mt19937_64` (era 2) — not a browser |
 
 (The chrome 28–50 and firefox 24–50 captures bracket the MWC→xorshift and
 drand48→xorshift transitions; opera 10.50/11.60 are later Presto.)
@@ -29,6 +30,14 @@ drand48→xorshift transitions; opera 10.50/11.60 are later Presto.)
 directly — `Random(seed).nextDouble()` in a tiny Dart program — with the seed
 recorded in the header so seed recovery is testable. The filename encodes the
 seed (`dart-seed12345.txt`).
+
+`hermes/` is likewise not from a browser and, additionally, not from a device:
+Hermes' `Math.random()` is `std::uniform_real_distribution<>(0,1)` over a stdlib
+engine, so these are **reference vectors** emitted by that exact stdlib pair
+(libstdc++/libc++ produce identical bits) — era 1 = `std::minstd_rand`, era 2 =
+`std::mt19937_64` — with the seed in the header. They are the ground truth the
+`hermes` model is validated against. See
+[`../docs/hermes-math-random.md`](../docs/hermes-math-random.md).
 
 ## How to add one
 

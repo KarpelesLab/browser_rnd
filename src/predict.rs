@@ -14,7 +14,9 @@
 //!
 //! Presto/Opera is identified but not predictable (SNOW 2.0 CSPRNG).
 
-use crate::engines::{dart, jsc, jscript, spidermonkey, spidermonkey_legacy, v8, v8_legacy, v8_libc};
+use crate::engines::{
+    dart, hermes, jsc, jscript, spidermonkey, spidermonkey_legacy, v8, v8_legacy, v8_libc,
+};
 use crate::prng::XorShift128Plus;
 
 /// What produced a capture.
@@ -41,6 +43,7 @@ enum Gen {
     Drand48Ie(u64),                                    // 48-bit LCG, 27+27, /2^54
     GameRand(jsc::GameRand),
     DartMwc(u64),                                      // MWC A=0xffffda61, 26+27, /2^53
+    HermesLcg(u32),                                    // minstd_rand LCG, 2 draws, /R^2
 }
 
 /// A recovered generator positioned at a capture, able to extend it both ways.
@@ -147,6 +150,7 @@ impl Predictor {
             Gen::Drand48Ie(seed) => jscript::generate(*seed, o + n)[o..].to_vec(),
             Gen::GameRand(st) => jsc::generate(*st, o + n)[o..].to_vec(),
             Gen::DartMwc(st) => dart::generate(*st, o + n)[o..].to_vec(),
+            Gen::HermesLcg(st) => hermes::generate(*st, o + n)[o..].to_vec(),
         }
     }
 
@@ -219,6 +223,13 @@ impl Predictor {
                 for _ in 0..2 * n { s = dart::prev_state(s); }
                 dart::generate(s, n)
             }
+            // Hermes MINSTD LCG: two steps per Math.random(), so rewind 2·n steps.
+            Gen::HermesLcg(st) => {
+                let inv = hermes::a_inv();
+                let mut s = *st;
+                for _ in 0..2 * n { s = hermes::prev(s, inv); }
+                hermes::generate(s, n)
+            }
         }
     }
 }
@@ -234,6 +245,21 @@ pub fn recover(values: &[f64]) -> Option<Predictor> {
     let obs = values.len();
     let g = grid_bits(values);
     let wrap = |id, gen| Some(Predictor { id, gen, observed: obs });
+    // Hermes Era-1 (React Native pre-2023-11) lands on a non-dyadic 1/R² grid, so
+    // it never matches the power-of-two buckets below. Try it first — recovery
+    // verifies by full reproduction, so a false positive is effectively impossible.
+    if let Some(state) = hermes::recover(values) {
+        return wrap(
+            id(
+                "Hermes",
+                "std::minstd_rand LCG (a=48271, m=2³¹−1; 2 draws → 1/R²)",
+                "React Native (Hermes) pre-2023-11 (RN ≲ 0.73)",
+                0,
+                "no — random_device, but only a 32-bit seed (~4·10⁹ streams)",
+            ),
+            Gen::HermesLcg(state),
+        );
+    }
     match g {
         30 => wrap(id("V8", "libc rand()×2 (srand(time))", "Chrome 1", 30, "yes — wall-clock ms"), Gen::Libc(v8_libc::recover(values)?)),
         32 => {
@@ -337,6 +363,10 @@ mod tests {
     #[test]
     fn dart_mwc() {
         check(&dart::generate(dart::seeded(0xC0FF_EE42), 200), "Dart");
+    }
+    #[test]
+    fn hermes_lcg() {
+        check(&hermes::generate(hermes::seeded(0x0BAD_F00D), 200), "Hermes");
     }
     #[test]
     fn modern_v8() {

@@ -16,6 +16,7 @@ engines:
 | **SpiderMonkey** | Firefox | xorshift128+ | `((s0+s1) & (2⁵³-1)) * 2⁻⁵³` (**low** 53) | in order |
 | **JavaScriptCore** | Safari ≤8, iOS | GameRand (2×u32) | `m_high / 2³²` (32-bit) | in order |
 | **Dart** | **Flutter** apps (VM/AOT/wasm) | MWC `A=0xffffda61` (u64) | `(bits26·2²⁷+bits27) / 2⁵³` (53-bit) | in order |
+| **Hermes** | **React Native** apps | `std::minstd_rand` LCG → `std::mt19937_64` (2023) | `uniform_real_distribution` (`1/R²` → `2⁻⁵³`) | in order |
 
 The conversion is the part that distinguishes them: V8 reads `s0` directly (so
 its recovery is GF(2)-linear), while SpiderMonkey/JSC sum both lanes (`s0+s1`,
@@ -28,6 +29,15 @@ browser `Math.random()`. It's the same on every Flutter version and native
 platform; only the web target differs (seedless `Random()` there delegates to
 the host browser's `Math.random()`). Full analysis:
 [`docs/dart-flutter-random.md`](docs/dart-flutter-random.md).
+
+**Hermes** (React Native) also stands apart: it never wrote its own PRNG, just
+seeds a C++ stdlib engine and converts with `std::uniform_real_distribution`.
+That engine changed exactly once — `std::minstd_rand` (a 31-bit MINSTD LCG,
+2019–2023) → `std::mt19937_64` (Nov 2023, PR #1175, fixing a 32-bit-seed
+collision bug). Era 1 lands on a unique **non-dyadic `1/R²` grid** and its whole
+31-bit state falls out of a single output (`floor(value·R)`), making it the most
+trivially crackable engine here; Era 2 is reproducible but its MT state needs a
+bulk GF(2) solve. Full history: [`docs/hermes-math-random.md`](docs/hermes-math-random.md).
 
 ## Prediction API
 
@@ -81,7 +91,8 @@ src/engines/           per-browser models (generate + recover):
                          v8, v8_legacy (MWC eras), v8_libc (Chrome 1),
                          spidermonkey, spidermonkey_legacy (drand48),
                          jscript (IE6-11), jsc (Safari GameRand), presto,
-                         dart (Flutter — Dart Random MWC)
+                         dart (Flutter — Dart Random MWC),
+                         hermes (React Native — minstd LCG / mt19937_64)
 src/gf2.rs             GF(2) linear solver (modern V8 recovery)
 src/sample.rs          parse captured textarea dumps
 src/analyze.rs         engine fingerprinting (grid / mantissa resolution + UA)
@@ -112,6 +123,8 @@ double-conversion denominator — the first thing the fingerprint pins down.
 | Presto | Opera 10 | 2⁻⁵³ | **SNOW 2.0 CSPRNG** + entropy reseeding | **infeasible by design** | 🔒 unpredictable |
 | oldest V8 | Chrome 1 (2008, Win) | 2⁻³⁰ | MSVCRT `rand()` × 2, `hi·2¹⁵+lo` | 2¹⁷ brute | ✅ cracked |
 | **Dart / Flutter** | Flutter VM/AOT/wasm (real captures) | 2⁻⁵³ | **MWC `A=0xffffda61`**, low 26+27 of 2 steps | **2¹¹ brute (closed-form)** | ✅ cracked |
+| **Hermes era 1 (LCG)** | React Native ≤ ~RN 0.73 (2019–2023) | **1/R²** (non-dyadic) | **`std::minstd_rand`** LCG (48271, 2³¹−1), 2 draws/call | **O(1)** `floor(v·R)` | ✅ cracked |
+| Hermes era 2 (MT) | React Native ~RN 0.74+ (2023-11→) | 2⁻⁵³-ish | `std::mt19937_64`, top 53 bits of 1 output | GF(2), ~625 outputs | 🔁 reproduced |
 
 Notable findings:
 - **IE 6–11 all share one generator**: drand48 (`0x5DEECE66D`,+11), two steps/call,
@@ -140,6 +153,15 @@ Notable findings:
   Thomas-Wang `mix64` + 4 warm-up cranks, all invertible). The one platform quirk:
   **seedless Flutter *web* uses the browser's `Math.random()`**, not the MWC.
   See [`docs/dart-flutter-random.md`](docs/dart-flutter-random.md).
+- **Hermes (React Native) is two eras of a stdlib engine, not a custom PRNG.**
+  `Math.random` just wraps `std::uniform_real_distribution` over a stdlib engine
+  that changed once (2023-11, PR #1175): `std::minstd_rand` → `std::mt19937_64`.
+  Era 1's MINSTD LCG folds **2 draws** into `((g0−1)+(g1−1)·R)/R²` (`R=2³¹−2`),
+  so it sits on a unique non-dyadic grid and `floor(v·R)` hands you the whole
+  31-bit state from one value — the cheapest crack in this repo. Era 2 is a
+  64-bit Mersenne Twister (`out/2⁶⁴`); reproducible, but recovery needs a bulk
+  GF(2) solve. Both eras cross-validated bit-for-bit against libstdc++/libc++
+  `std::uniform_real_distribution`. See [`docs/hermes-math-random.md`](docs/hermes-math-random.md).
 
 ### Pinned version transitions (from the sample sweep)
 

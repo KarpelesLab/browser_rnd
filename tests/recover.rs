@@ -9,7 +9,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use browser_rnd::engines::{dart, jsc, jscript, spidermonkey, spidermonkey_legacy, v8, v8_legacy, v8_libc};
+use browser_rnd::engines::{dart, hermes, jsc, jscript, spidermonkey, spidermonkey_legacy, v8, v8_legacy, v8_libc};
 use browser_rnd::prng::XorShift128Plus;
 use browser_rnd::sample::Sample;
 
@@ -217,6 +217,25 @@ fn flutter_dart_mwc() {
     if tried == 0 {
         eprintln!("skip: no Dart fixtures");
     }
+}
+
+#[test]
+fn hermes_react_native_minstd_lcg() {
+    // Reference vector: std::uniform_real_distribution<>(0,1) over std::minstd_rand
+    // seeded with 0x12345678 — exactly Hermes' pre-2023 Math.random() (React
+    // Native ≤ ~0.73). Recover the 31-bit LCG state (closed-form) and reproduce
+    // the whole sequence, then confirm the seed falls out too.
+    let rel = "hermes/hermes-lcg-seed0x12345678.txt";
+    let Some(v) = load(rel) else {
+        eprintln!("skip: no Hermes fixture");
+        return;
+    };
+    let state = hermes::recover(&v).unwrap_or_else(|| panic!("{rel}: hermes recover failed"));
+    assert!(
+        hermes::generate(state, v.len()).iter().zip(&v).all(|(a, b)| (a - b).abs() < 1e-12),
+        "{rel}: reproduction mismatch"
+    );
+    assert_eq!(hermes::recover_seed(&v), Some(0x1234_5678), "{rel}: seed recovery");
 }
 
 // Keep an explicit reference so unused-import lints don't fire if a test is cut.

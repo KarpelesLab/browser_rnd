@@ -49,7 +49,11 @@ fn main() -> Result<()> {
                     println!("engine:      {}", id.engine);
                     println!("algorithm:   {}", id.algorithm);
                     println!("browsers:    {}", id.browsers);
-                    println!("grid:        2^-{}", id.grid_bits);
+                    if id.grid_bits == 0 {
+                        println!("grid:        non-dyadic (1/R², R = 2³¹−2)");
+                    } else {
+                        println!("grid:        2^-{}", id.grid_bits);
+                    }
                     println!("time-seeded: {}", id.time_seeded);
                     if !id.predictable {
                         println!("\nNot predictable (cryptographic RNG) — cannot recover state.");
